@@ -221,8 +221,11 @@ final class LibraryStore {
     // MARK: Downloads
 
     nonisolated static func downloadURL(for videoId: String) -> URL? {
-        let u = downloadsDirectory.appendingPathComponent("\(videoId).m4a")
-        return FileManager.default.fileExists(atPath: u.path) ? u : nil
+        for ext in ["caf", "m4a"] {
+            let u = downloadsDirectory.appendingPathComponent("\(videoId).\(ext)")
+            if FileManager.default.fileExists(atPath: u.path) { return u }
+        }
+        return nil
     }
 
     func isDownloaded(_ song: Song) -> Bool { downloadStates[song.videoId] == .done }
@@ -240,7 +243,6 @@ final class LibraryStore {
     private func performDownload(_ song: Song) async {
         let id = song.videoId
         var song = song
-        let destination = Self.downloadsDirectory.appendingPathComponent("\(id).m4a")
         let quality = AppSettings.shared.downloadQuality
         // Three at a time, so "Download all" on a big list doesn't flood the connection.
         while runningDownloads >= 3 {
@@ -250,15 +252,19 @@ final class LibraryStore {
         runningDownloads += 1
         defer { runningDownloads -= 1 }
         do {
-            if quality == .high, let cached = AudioCache.url(for: id) {
+            let cached = AudioCache.url(for: id)
+            // Reuse a fully streamed copy only when it's what this quality would download anyway.
+            let reuse = cached.map { url in quality.allowsOpus ? url.pathExtension == "caf" : (quality != .low && url.pathExtension == "m4a") } ?? false
+            if reuse, let cached {
                 try FileManager.default.createDirectory(at: Self.downloadsDirectory, withIntermediateDirectories: true)
-                try? FileManager.default.removeItem(at: destination)
-                try FileManager.default.copyItem(at: cached, to: destination)
+                let target = Self.downloadsDirectory.appendingPathComponent("\(id).\(cached.pathExtension)")
+                try? FileManager.default.removeItem(at: target)
+                try FileManager.default.copyItem(at: cached, to: target)
             } else {
-                let length = try await StreamLoader.download(videoId: id, to: destination, quality: quality) { progress in
+                let result = try await StreamLoader.download(videoId: id, into: Self.downloadsDirectory, quality: quality) { progress in
                     Task { @MainActor in LibraryStore.shared.downloadStates[id] = .downloading(progress) }
                 }
-                if song.durationText == nil, let length { song.durationText = Self.format(length) }
+                if song.durationText == nil, let length = result.duration { song.durationText = Self.format(length) }
             }
             downloadStates[id] = .done
             pendingDownloads[id] = nil

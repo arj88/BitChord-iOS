@@ -42,13 +42,28 @@ struct SettingsView: View {
             }
 
             Section("Playback") {
-                VStack(alignment: .leading) {
-                    HStack {
-                        Text("Crossfade")
-                        Spacer()
-                        Text(settings.crossfade == 0 ? "Off" : "\(Int(settings.crossfade))s").foregroundStyle(.secondary)
+                Toggle(isOn: $settings.automix) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Automix (beta)")
+                        Text("DJ-style transitions: beats lined up, tempos matched, bass swapped.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
-                    Slider(value: $settings.crossfade, in: 0...12, step: 1)
+                }
+                if settings.automix {
+                    Picker("Transition length", selection: $settings.automixBeats) {
+                        Text("Short — 8 beats").tag(8)
+                        Text("Medium — 16 beats").tag(16)
+                        Text("Long — 32 beats").tag(32)
+                    }
+                } else {
+                    VStack(alignment: .leading) {
+                        HStack {
+                            Text("Crossfade")
+                            Spacer()
+                            Text(settings.crossfade == 0 ? "Off" : "\(Int(settings.crossfade))s").foregroundStyle(.secondary)
+                        }
+                        Slider(value: $settings.crossfade, in: 0...12, step: 1)
+                    }
                 }
                 Toggle("Volume normalization", isOn: $settings.normalize)
                 Toggle("Autoplay similar songs", isOn: $settings.autoplay)
@@ -56,18 +71,20 @@ struct SettingsView: View {
             }
 
             Section {
-                Picker("Download quality", selection: $settings.downloadQuality) {
-                    Text("Maximum — AAC ~128 kbps").tag(AudioQuality.high)
-                    Text("Data saver — AAC ~48 kbps").tag(AudioQuality.low)
-                }
                 Picker("Streaming quality", selection: $settings.quality) {
-                    Text("Maximum — AAC ~128 kbps").tag(AudioQuality.high)
-                    Text("Data saver — AAC ~48 kbps").tag(AudioQuality.low)
+                    ForEach(AudioQuality.choices) { Text($0.label).tag($0) }
+                }
+                Picker("Download quality", selection: $settings.downloadQuality) {
+                    ForEach(AudioQuality.choices) { Text($0.label).tag($0) }
+                }
+                if !OpusSupport.isAvailable {
+                    Text("This iPhone couldn't play the repackaged Opus files, so AAC 128 kbps is used instead.")
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
             } header: {
                 Text("Audio quality")
             } footer: {
-                Text("Maximum is the highest-quality audio YouTube gives this app. Its 256 kbps AAC is reserved for Premium in the official apps, and its Opus streams are in a format iPhone can't play.")
+                Text("Opus (~160 kbps) is YouTube's best audio for everyone; it starts a second or two later because each song is fetched whole and repackaged for iPhone. AAC 256 kbps is only sent to YouTube Music Premium accounts — sign in first; without Premium it falls back to Opus.")
             }
 
             Section("Lyrics") {

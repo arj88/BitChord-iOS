@@ -192,29 +192,65 @@ final class StreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Se
         return URLSession(configuration: config)
     }()
 
-    /// Downloads the whole stream to a file (used by offline downloads).
-    /// - Returns: the track's real length in seconds, when YouTube gave it.
-    @discardableResult
-    static func download(videoId: String, to destination: URL, quality: AudioQuality = .high,
-                         progress: @escaping (Double) -> Void) async throws -> Double? {
-        var stream = try await StreamResolver.shared.resolve(videoId, forceFresh: true, quality: quality)
-        if stream.isHLS { throw StreamError.unplayable("This track can only be streamed") }
+    /// Fetches a whole stream into memory, in the chunk sizes googlevideo serves fastest.
+    static func fetchAll(videoId: String, stream: ResolvedStream, progress: ((Double) -> Void)? = nil) async throws -> Data {
         let loader = StreamLoader(videoId: videoId, stream: stream)
         let total = try await loader.contentLength()
-        stream = loader.stream ?? stream
+        let size = loader.stream?.chunkSize ?? stream.chunkSize
         var data = Data(capacity: Int(total))
         var offset: Int64 = 0
         while offset < total {
             try Task.checkCancellation()
-            let piece = try await loader.chunk(at: offset, size: stream.chunkSize, total: total)
+            let piece = try await loader.chunk(at: offset, size: size, total: total)
+            if piece.isEmpty { break }
             data.append(piece)
             offset += Int64(piece.count)
-            progress(Double(offset) / Double(total))
-            if piece.isEmpty { break }
+            progress?(Double(offset) / Double(total))
         }
-        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: destination, options: .atomic)
-        return stream.durationSeconds
+        return data
+    }
+
+    /// Turns fetched bytes into a playable file: AAC is kept as .m4a, Opus is repackaged into .caf.
+    static func playableFile(from data: Data, stream: ResolvedStream) throws -> (data: Data, ext: String) {
+        if stream.isOpus { return (try OpusRemuxer.webmToCAF(data), "caf") }
+        return (data, "m4a")
+    }
+
+    /// Downloads a whole track into `directory` (used by offline downloads).
+    /// - Returns: the file written and the track's real length in seconds, when known.
+    static func download(videoId: String, into directory: URL, quality: AudioQuality = .high,
+                         progress: @escaping (Double) -> Void) async throws -> (url: URL, duration: Double?) {
+        var effective = quality
+        if quality.allowsOpus && !OpusSupport.isAvailable { effective = .high }
+        let stream = try await StreamResolver.shared.resolve(videoId, forceFresh: true, quality: effective)
+        if stream.isHLS { throw StreamError.unplayable("This track can only be streamed") }
+        let raw = try await fetchAll(videoId: videoId, stream: stream, progress: progress)
+        let file = try playableFile(from: raw, stream: stream)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for ext in ["m4a", "caf"] { try? FileManager.default.removeItem(at: directory.appendingPathComponent("\(videoId).\(ext)")) }
+        let destination = directory.appendingPathComponent("\(videoId).\(file.ext)")
+        try file.data.write(to: destination, options: .atomic)
+        if file.ext == "caf", !(await OpusSupport.verify(destination)) {
+            // iOS refused the repackaged Opus: fall back to AAC for this and later downloads.
+            try? FileManager.default.removeItem(at: destination)
+            return try await download(videoId: videoId, into: directory, quality: .high, progress: progress)
+        }
+        return (destination, stream.durationSeconds)
+    }
+}
+
+/// Whether this iPhone plays the repackaged Opus files. Assumed yes until a file fails.
+enum OpusSupport {
+    private static let key = "opusUnsupported"
+    static var isAvailable: Bool { !UserDefaults.standard.bool(forKey: key) }
+
+    static func verify(_ url: URL) async -> Bool {
+        let asset = AVURLAsset(url: url)
+        let playable = (try? await asset.load(.isPlayable)) ?? false
+        let tracks = (try? await asset.loadTracks(withMediaType: .audio)) ?? []
+        let ok = playable && !tracks.isEmpty
+        if !ok { UserDefaults.standard.set(true, forKey: key) }
+        return ok
     }
 }
 
@@ -226,16 +262,27 @@ enum AudioCache {
     static var limitBytes: Int64 = 1024 * 1024 * 1024
 
     static func url(for videoId: String) -> URL? {
-        let u = directory.appendingPathComponent("\(videoId).m4a")
-        return FileManager.default.fileExists(atPath: u.path) ? u : nil
+        for ext in ["caf", "m4a"] {
+            let u = directory.appendingPathComponent("\(videoId).\(ext)")
+            if FileManager.default.fileExists(atPath: u.path) { return u }
+        }
+        return nil
     }
 
-    static func store(_ data: Data, for videoId: String) {
+    static func store(_ data: Data, for videoId: String, ext: String = "m4a") {
         DispatchQueue.global(qos: .utility).async {
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try? data.write(to: directory.appendingPathComponent("\(videoId).m4a"), options: .atomic)
+            try? data.write(to: directory.appendingPathComponent("\(videoId).\(ext)"), options: .atomic)
             trim()
         }
+    }
+
+    /// Writes synchronously and returns the file (used when playback waits on it).
+    static func write(_ data: Data, for videoId: String, ext: String) throws -> URL {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let u = directory.appendingPathComponent("\(videoId).\(ext)")
+        try data.write(to: u, options: .atomic)
+        return u
     }
 
     static func size() -> Int64 {

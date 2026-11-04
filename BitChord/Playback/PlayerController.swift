@@ -32,6 +32,8 @@ final class PlayerController {
     private(set) var lyricsLoading = false
     var lyricsOffset: Double = 0
     private(set) var relatedBrowseId: String?
+    /// What Automix decided for the next transition (shown in stats for nerds).
+    private(set) var automixStatus: String?
 
     var current: Song? { queue.indices.contains(index) ? queue[index] : nil }
     var hasNext: Bool { index + 1 < queue.count || repeatMode == .all }
@@ -171,6 +173,7 @@ final class PlayerController {
 
     func pause() {
         cancelFade()
+        resetAutomix()
         players[active].pause()
         players[standby].pause()
         isPlaying = false
@@ -208,6 +211,7 @@ final class PlayerController {
 
     func seek(to seconds: Double) {
         cancelFade()
+        resetAutomix()
         let t = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
         players[active].seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
         position = seconds
@@ -310,6 +314,7 @@ final class PlayerController {
     private func advance(to newIndex: Int) {
         guard queue.indices.contains(newIndex) else { return }
         cancelFade()
+        resetAutomix()
         if let prepared = preparedIndex, prepared == newIndex, preparedSongId == queue[newIndex].videoId,
            players[standby].currentItem != nil {
             // Hand over to the pre-buffered player: no gap.
@@ -382,31 +387,62 @@ final class PlayerController {
     }
 
     /// Builds the AVPlayerItem for a song: local file, download, cache, or stream.
-    private func makeItem(for song: Song) async throws -> (AVPlayerItem, Float, String, Double?) {
+    private func makeItem(for song: Song, preferFile: Bool = false) async throws -> (AVPlayerItem, Float, String, Double?) {
         if let name = song.localFile {
             let url = LibraryStore.importsDirectory.appendingPathComponent(name)
             return (configured(AVPlayerItem(url: url)), 1, "Local file · \(url.pathExtension.uppercased())", nil)
         }
         if let url = LibraryStore.downloadURL(for: song.videoId) {
-            return (configured(AVPlayerItem(url: url)), 1, "Downloaded · AAC", song.durationSeconds)
+            return (configured(AVPlayerItem(url: url)), 1, "Downloaded · \(Self.codecName(url))", song.durationSeconds)
         }
         if let url = AudioCache.url(for: song.videoId) {
-            return (configured(AVPlayerItem(url: url)), 1, "Cached · AAC", song.durationSeconds)
+            return (configured(AVPlayerItem(url: url)), 1, "Cached · \(Self.codecName(url))", song.durationSeconds)
         }
-        let stream = try await StreamResolver.shared.resolve(song.videoId)
+        var quality = settings.quality
+        if quality.allowsOpus && !OpusSupport.isAvailable { quality = .high }
+        var stream = try await StreamResolver.shared.resolve(song.videoId, quality: quality)
         var g: Float = 1
         if settings.normalize, let db = stream.loudnessDb, db > 0 {
             g = Float(pow(10, -db / 20))
         }
+        if stream.isOpus {
+            // Opus comes in WebM, which AVPlayer can't open: fetch it whole (a couple of
+            // seconds), repackage it into CAF and play that file.
+            do {
+                let raw = try await StreamLoader.fetchAll(videoId: song.videoId, stream: stream)
+                let file = try StreamLoader.playableFile(from: raw, stream: stream)
+                let url = try AudioCache.write(file.data, for: song.videoId, ext: file.ext)
+                if await OpusSupport.verify(url) {
+                    return (configured(AVPlayerItem(url: url)), g, stream.codecDescription, stream.durationSeconds ?? song.durationSeconds)
+                }
+                try? FileManager.default.removeItem(at: url)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // Fall through to AAC below.
+            }
+            stream = try await StreamResolver.shared.resolve(song.videoId, forceFresh: true, quality: .high)
+        }
         if stream.isHLS {
             let asset = AVURLAsset(url: stream.url, options: ["AVURLAssetHTTPHeaderFieldsKey": stream.headers])
             return (configured(AVPlayerItem(asset: asset)), g, "HLS · \(stream.clientName)", stream.durationSeconds)
+        }
+        if preferFile {
+            // Automix needs the whole next track on disk to analyse and to start it on the beat.
+            if let raw = try? await StreamLoader.fetchAll(videoId: song.videoId, stream: stream),
+               let url = try? AudioCache.write(raw, for: song.videoId, ext: "m4a") {
+                return (configured(AVPlayerItem(url: url)), g, stream.codecDescription, stream.durationSeconds ?? song.durationSeconds)
+            }
         }
         loaders[song.videoId]?.cancelAll()
         let loader = StreamLoader(videoId: song.videoId, stream: stream)
         loaders[song.videoId] = loader
         trimLoaders()
         return (configured(AVPlayerItem(asset: loader.makeAsset())), g, stream.codecDescription, stream.durationSeconds ?? song.durationSeconds)
+    }
+
+    nonisolated static func codecName(_ url: URL) -> String {
+        url.pathExtension.lowercased() == "caf" ? "Opus" : "AAC"
     }
 
     private func configured(_ item: AVPlayerItem) -> AVPlayerItem {
@@ -491,6 +527,7 @@ final class PlayerController {
     }
 
     private func invalidatePrepared() {
+        resetAutomix()
         preparedIndex = nil
         preparedSongId = nil
         players[standby].replaceCurrentItem(with: nil)
@@ -503,7 +540,7 @@ final class PlayerController {
         preparedSongId = song.videoId
         let slot = standby
         Task {
-            guard let prepared = try? await self.makeItem(for: song) else {
+            guard let prepared = try? await self.makeItem(for: song, preferFile: self.automixOn) else {
                 if self.preparedSongId == song.videoId { self.preparedIndex = nil; self.preparedSongId = nil }
                 return
             }
@@ -572,6 +609,215 @@ final class PlayerController {
         players[standby].pause()
         players[standby].replaceCurrentItem(with: nil)
         players[active].volume = gain[active]
+        if automixActive { finishAutomixCleanup() }
+    }
+
+    // MARK: Automix
+
+    @ObservationIgnored private var automixPlan: TransitionPlan?
+    @ObservationIgnored private var automixPlanningKey: String?
+    @ObservationIgnored private var automixScheduled = false
+    @ObservationIgnored private var automixActive = false
+    @ObservationIgnored private var automixOutgoing: AVPlayer?
+    @ObservationIgnored private var rateGlideTimer: Timer?
+    @ObservationIgnored private var rateGlideStep = 0
+    @ObservationIgnored private var rateGlideFrom: Float = 1
+
+    /// Automix runs only when nothing else is bending time: normal speed, no repeat-one, no stop-after.
+    private var automixOn: Bool {
+        settings.automix && playbackRate == 1 && repeatMode != .one && !stopAfterCurrent
+    }
+
+    private func automixTick(remaining: Double) {
+        guard !fading, let n = nextIndex, queue.indices.contains(n) else { return }
+        let key = (current?.videoId ?? "") + ">" + queue[n].videoId
+        if automixPlan == nil {
+            // Plan once the next track is on disk in the standby player.
+            if remaining < 80, automixPlanningKey != key, preparedIndex == n, preparedSongId == queue[n].videoId,
+               let url = (players[standby].currentItem?.asset as? AVURLAsset)?.url, url.isFileURL {
+                automixPlanningKey = key
+                planAutomix(key: key, incomingURL: url)
+            }
+            return
+        }
+        guard let plan = automixPlan, !automixScheduled else { return }
+        let lead = plan.outStart - livePosition()
+        if lead <= 1.2 && lead > 0.1 {
+            scheduleAutomix(plan)
+        } else if lead <= 0.1 {
+            // Missed the moment (a stall, say): let the song end normally.
+            resetAutomix()
+            automixPlanningKey = key
+        }
+    }
+
+    private func planAutomix(key: String, incomingURL: URL) {
+        guard let outgoing = current, let n = nextIndex else { return }
+        let incoming = queue[n]
+        let outDuration = duration
+        let inDuration = knownDurations[standby] ?? incoming.durationSeconds ?? 240
+        let beats = settings.automixBeats
+        automixStatus = "Automix: analysing…"
+        Task {
+            guard let outURL = await self.fileURL(for: outgoing) else {
+                self.automixStatus = "Automix: couldn't read this song"
+                return
+            }
+            async let tail = AutomixAudio.grid(videoId: outgoing.videoId, url: outURL, section: .tail, duration: outDuration)
+            async let head = AutomixAudio.grid(videoId: incoming.videoId, url: incomingURL, section: .head, duration: inDuration)
+            let (out, inc) = await (tail, head)
+            // Still the same pair, and nothing was reset meanwhile?
+            guard self.automixPlanningKey == key, self.current?.videoId == outgoing.videoId,
+                  self.nextIndex.map({ self.queue[$0].videoId }) == incoming.videoId else { return }
+            guard let out, let inc,
+                  let plan = AutomixPlanner.plan(outgoing: out, outDuration: outDuration, incoming: inc,
+                                                 beats: beats, notBefore: self.livePosition() + 4) else {
+                self.automixStatus = "Automix: no clean transition found, using a normal ending"
+                return
+            }
+            let outItem = self.players[self.active].currentItem
+            let inPlayer = self.players[self.standby]
+            guard let inItem = inPlayer.currentItem else { return }
+
+            // Outgoing: equal-power fade from the mix point; bass leaves at the swap.
+            let swapOut = plan.outStart + plan.fadeSeconds * plan.swapAt
+            let beatOut = 60 / out.bpm
+            let outFilter = BassSwapFilter(points: [(swapOut - beatOut / 2, 20), (swapOut + beatOut / 2, 220)])
+            // Incoming (its own time runs at `rate`): fade in; bass arrives at the swap.
+            let inFade = plan.fadeSeconds * plan.rate
+            let swapIn = plan.inStart + inFade * plan.swapAt
+            let beatIn = beatOut * plan.rate
+            let inFilter = BassSwapFilter(points: [(swapIn - beatIn / 2, 220), (swapIn + beatIn / 2, 20)])
+
+            let outMix = await AutomixAudio.audioMix(for: outItem ?? inItem,
+                volume: [(0.0, Float(1))] + AutomixAudio.equalPower(from: plan.outStart, to: plan.outStart + plan.fadeSeconds, fadingIn: false),
+                filter: plan.beatMatched ? outFilter : nil)
+            let inMix = await AutomixAudio.audioMix(for: inItem,
+                volume: AutomixAudio.equalPower(from: plan.inStart, to: plan.inStart + inFade, fadingIn: true),
+                filter: plan.beatMatched ? inFilter : nil)
+            guard self.automixPlanningKey == key, let outItem, outItem === self.players[self.active].currentItem,
+                  inItem === self.players[self.standby].currentItem else { return }
+            outItem.audioMix = outMix
+            inItem.audioMix = inMix
+            _ = await inPlayer.seek(to: CMTime(seconds: plan.inStart, preferredTimescale: 48000),
+                                    toleranceBefore: .zero, toleranceAfter: .zero)
+            guard self.automixPlanningKey == key else { return }
+            self.automixPlan = plan
+            self.automixStatus = plan.summary
+        }
+    }
+
+    /// Starts the incoming track at the exact host time the outgoing one reaches the mix point.
+    private func scheduleAutomix(_ plan: TransitionPlan) {
+        let outPlayer = players[active]
+        let inPlayer = players[standby]
+        guard let outItem = outPlayer.currentItem, let inItem = inPlayer.currentItem,
+              inItem.status == .readyToPlay else {
+            resetAutomix()
+            return
+        }
+        let hostClock = CMClockGetHostTimeClock()
+        let mixPoint = CMTime(seconds: plan.outStart, preferredTimescale: 48000)
+        var hostTime: CMTime
+        if let timebase = outItem.timebase {
+            hostTime = CMSyncConvertTime(mixPoint, from: timebase, to: hostClock)
+        } else {
+            let lead = max(0, plan.outStart - livePosition())
+            hostTime = CMTimeAdd(CMClockGetTime(hostClock), CMTime(seconds: lead, preferredTimescale: 48000))
+        }
+        if !hostTime.isValid { hostTime = CMClockGetTime(hostClock) }
+        inPlayer.automaticallyWaitsToMinimizeStalling = false
+        inPlayer.volume = gain[standby]
+        inPlayer.setRate(Float(plan.rate), time: CMTime(seconds: plan.inStart, preferredTimescale: 48000), atHostTime: hostTime)
+        automixScheduled = true
+        let lead = max(0, plan.outStart - livePosition())
+        DispatchQueue.main.asyncAfter(deadline: .now() + lead) { [weak self] in
+            MainActor.assumeIsolated { self?.automixStarted(plan) }
+        }
+    }
+
+    private func automixStarted(_ plan: TransitionPlan) {
+        guard automixScheduled, automixPlan != nil, let n = nextIndex else { return }
+        automixActive = true
+        fading = true
+        automixOutgoing = players[active]
+        active = standby
+        index = n
+        preparedIndex = nil
+        preparedSongId = nil
+        isPlaying = true
+        songDidStart()
+        DispatchQueue.main.asyncAfter(deadline: .now() + plan.fadeSeconds + 0.2) { [weak self] in
+            MainActor.assumeIsolated { self?.automixFinished(plan) }
+        }
+    }
+
+    private func automixFinished(_ plan: TransitionPlan) {
+        guard automixActive else { return }
+        automixOutgoing?.pause()
+        automixOutgoing?.currentItem?.audioMix = nil
+        automixOutgoing?.replaceCurrentItem(with: nil)
+        finishAutomixCleanup()
+        // Ease back to normal speed over a few seconds rather than jumping.
+        if abs(plan.rate - 1) > 0.001, isPlaying {
+            rateGlideFrom = Float(plan.rate)
+            rateGlideStep = 0
+            rateGlideTimer?.invalidate()
+            rateGlideTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.rateGlideTick() }
+            }
+        }
+    }
+
+    private func rateGlideTick() {
+        rateGlideStep += 1
+        let t = min(1, Float(rateGlideStep) / 16)
+        let rate = rateGlideFrom + (playbackRate - rateGlideFrom) * t
+        if isPlaying { players[active].rate = rate }
+        if t >= 1 { rateGlideTimer?.invalidate(); rateGlideTimer = nil }
+    }
+
+    /// Clears the bookkeeping once a mix is over (or abandoned mid-way).
+    private func finishAutomixCleanup() {
+        automixActive = false
+        fading = false
+        automixScheduled = false
+        automixPlan = nil
+        automixOutgoing = nil
+        players[active].automaticallyWaitsToMinimizeStalling = true
+        players[active].currentItem?.audioMix = nil
+        players[active].volume = gain[active]
+        if isPlaying && rateGlideTimer == nil { players[active].rate = playbackRate }
+    }
+
+    /// Drops a planned (not yet started) mix and undoes its fades, so the song plays on untouched.
+    private func resetAutomix() {
+        rateGlideTimer?.invalidate()
+        rateGlideTimer = nil
+        if automixActive { return }
+        if automixScheduled {
+            players[standby].pause()
+            players[standby].automaticallyWaitsToMinimizeStalling = true
+        }
+        if automixPlan != nil || automixScheduled {
+            players[active].currentItem?.audioMix = nil
+            players[standby].currentItem?.audioMix = nil
+        }
+        automixPlan = nil
+        automixScheduled = false
+        automixPlanningKey = nil
+        if automixStatus != nil { automixStatus = nil }
+    }
+
+    /// A file holding the whole song, fetching it if it was only streamed.
+    private func fileURL(for song: Song) async -> URL? {
+        if let name = song.localFile { return LibraryStore.importsDirectory.appendingPathComponent(name) }
+        if let url = LibraryStore.downloadURL(for: song.videoId) { return url }
+        if let url = AudioCache.url(for: song.videoId) { return url }
+        guard let stream = try? await StreamResolver.shared.resolve(song.videoId), !stream.isHLS,
+              let raw = try? await StreamLoader.fetchAll(videoId: song.videoId, stream: stream),
+              let file = try? StreamLoader.playableFile(from: raw, stream: stream) else { return nil }
+        return try? AudioCache.write(file.data, for: song.videoId, ext: file.ext)
     }
 
     /// The real length of what each player holds, when YouTube told us (see ResolvedStream.durationSeconds).
@@ -598,10 +844,14 @@ final class PlayerController {
         guard duration > 0, isPlaying else { return }
         let remaining = duration - position
 
-        if remaining < 30 { prepareNext() }
-        let fade = settings.crossfade
-        if fade > 0, !fading, remaining <= fade, remaining > 0.3, !stopAfterCurrent, repeatMode != .one {
-            startCrossfade(over: min(fade, remaining))
+        if remaining < (automixOn ? 100 : 30) { prepareNext() }
+        if automixOn {
+            automixTick(remaining: remaining)
+        } else {
+            let fade = settings.crossfade
+            if fade > 0, !fading, remaining <= fade, remaining > 0.3, !stopAfterCurrent, repeatMode != .one {
+                startCrossfade(over: min(fade, remaining))
+            }
         }
         if index >= queue.count - 2, settings.autoplay, !fetchingRadio, let seed = current, repeatMode == .off,
            Date().timeIntervalSince(lastRadioAttempt) > 30 {
@@ -638,8 +888,13 @@ final class PlayerController {
             radioToken = next.continuation
             let known = Set(queue.map(\.videoId))
             let fresh = next.songs.filter { !known.contains($0.videoId) }
+            let nextBefore = nextIndex.map { queue[$0].videoId }
             queue += fresh
-            invalidatePrepared()
+            // Appending only changes what comes next if the queue had run out; keep a
+            // prepared track (and any Automix plan for it) otherwise.
+            if nextIndex.map({ queue[$0].videoId }) != nextBefore || preparedSongId != nextBefore {
+                invalidatePrepared()
+            }
             saveQueue()
         } catch {
             radioToken = nil

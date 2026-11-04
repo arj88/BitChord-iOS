@@ -120,7 +120,8 @@ struct NowPlayingView: View {
                 })
                 .onTapGesture(count: 2) { if let s = player.current { library.toggleLike(s) } }
             if showStats || settings.showNerdStats, let info = player.streamInfo {
-                Text(info)
+                Text([info, settings.automix ? player.automixStatus : nil].compactMap { $0 }.joined(separator: "\n"))
+                    .multilineTextAlignment(.center)
                     .font(.caption.monospaced())
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background(Capsule().fill(.black.opacity(0.35)))

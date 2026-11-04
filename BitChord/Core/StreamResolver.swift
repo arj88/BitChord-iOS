@@ -20,6 +20,8 @@ struct ResolvedStream {
     var durationSeconds: Double? = nil
 
     var isFresh: Bool { Date().timeIntervalSince(resolvedAt) < 20 * 60 }
+    /// WebM/Opus, which has to be repackaged before AVPlayer can play it.
+    var isOpus: Bool { mimeType.contains("webm") }
 
     /// googlevideo throttles some clients' large ranges; read those in smaller pieces.
     var chunkSize: Int64 { clientName.hasPrefix("ANDROID_VR") ? 512 * 1024 : 1024 * 1024 }
@@ -41,8 +43,29 @@ enum StreamError: LocalizedError {
 }
 
 enum AudioQuality: String, CaseIterable, Identifiable, Codable {
-    case high = "High", normal = "Normal", low = "Data saver"
+    /// 256 kbps AAC (itag 141) when the signed-in account has Premium; otherwise Opus.
+    case aac256 = "AAC 256"
+    /// ~160 kbps Opus (itag 251), repackaged into CAF so iOS can play it.
+    case opus = "Opus"
+    /// ~128 kbps AAC (itag 140).
+    case high = "High"
+    case normal = "Normal"
+    /// ~48 kbps HE-AAC (itag 139).
+    case low = "Data saver"
+
     var id: String { rawValue }
+    static var choices: [AudioQuality] { [.aac256, .opus, .high, .low] }
+
+    var label: String {
+        switch self {
+        case .aac256: return "AAC 256 kbps (Premium)"
+        case .opus: return "Opus ~160 kbps"
+        case .high, .normal: return "AAC 128 kbps"
+        case .low: return "Data saver ~48 kbps"
+        }
+    }
+
+    var allowsOpus: Bool { self == .aac256 || self == .opus }
 }
 
 /// Resolves a videoId into a direct googlevideo URL using YouTube's device
@@ -95,14 +118,16 @@ final class StreamResolver: @unchecked Sendable {
     private var cache: [String: ResolvedStream] = [:]
 
     func invalidate(_ videoId: String) {
-        lock.lock(); cache[videoId] = nil; lock.unlock()
+        lock.lock(); cache = cache.filter { !$0.key.hasPrefix(videoId + "|") }; lock.unlock()
     }
 
     /// - Parameter itag: when set (re-resolving mid-play), only that exact format will do,
     ///   because the bytes already played came from it.
     func resolve(_ videoId: String, forceFresh: Bool = false, itag: Int? = nil, quality: AudioQuality? = nil) async throws -> ResolvedStream {
+        let quality = quality ?? self.quality
+        let cacheKey = videoId + "|" + quality.rawValue
         if !forceFresh {
-            if let hit = cached(videoId), hit.isFresh { return hit }
+            if let hit = cached(cacheKey), hit.isFresh { return hit }
         }
         let tube = InnerTube.shared
         let visitor = await tube.ensureVisitorData()
@@ -110,9 +135,15 @@ final class StreamResolver: @unchecked Sendable {
         var hlsFallback: ResolvedStream?
 
         let usable = Self.clients.filter { !isBenched($0.name) }
-        for client in usable.isEmpty ? Self.clients : usable {
+        var attempts: [(client: Client, signedIn: Bool)] = (usable.isEmpty ? Self.clients : usable).map { ($0, false) }
+        // 256 kbps AAC is only ever offered to a signed-in Premium account, so ask as
+        // the account first; anything less from that request is ignored.
+        if quality == .aac256, tube.isSignedIn, itag == nil || itag == 141 {
+            attempts.insert((Self.clients[0], true), at: 0)
+        }
+        for (client, signedIn) in attempts {
             do {
-                let json = try await player(videoId: videoId, client: client, visitorData: visitor)
+                let json = try await player(videoId: videoId, client: client, visitorData: visitor, signedIn: signedIn)
                 let status = json.o("playabilityStatus")?.s("status") ?? ""
                 if status != "OK" {
                     lastReason = json.o("playabilityStatus")?.s("reason") ?? status
@@ -122,10 +153,13 @@ final class StreamResolver: @unchecked Sendable {
                 }
                 let streaming = json.o("streamingData")
                 let loudness = json.o("playerConfig")?.o("audioConfig")?.double("loudnessDb")
-                var formats = (streaming?.a("adaptiveFormats") ?? []).objects
-                    .filter { ($0.s("mimeType") ?? "").hasPrefix("audio/mp4") && $0.s("url") != nil }
+                var formats = (streaming?.a("adaptiveFormats") ?? []).objects.filter { f in
+                    let mime = f.s("mimeType") ?? ""
+                    return f.s("url") != nil && (mime.hasPrefix("audio/mp4") || ((quality.allowsOpus || itag != nil) && mime.hasPrefix("audio/webm")))
+                }
                 if let itag { formats = formats.filter { $0.int("itag") == itag } }
-                if let format = pick(formats, quality: quality ?? self.quality) {
+                if signedIn { formats = formats.filter { $0.int("itag") == 141 } }
+                if let format = pick(formats, quality: quality) {
                     let urlString = format.s("url")!
                     guard let url = URL(string: urlString) else { continue }
                     let length = format.s("contentLength").flatMap { Int64($0) }
@@ -142,7 +176,7 @@ final class StreamResolver: @unchecked Sendable {
                         lastReason = "YouTube refused the \(client.name) stream"
                         continue
                     }
-                    store(videoId, stream)
+                    store(cacheKey, stream)
                     return stream
                 }
                 if hlsFallback == nil, let hls = streaming?.s("hlsManifestUrl"), let url = URL(string: hls) {
@@ -155,7 +189,7 @@ final class StreamResolver: @unchecked Sendable {
             }
         }
         if let hlsFallback, itag == nil {
-            store(videoId, hlsFallback)
+            store(cacheKey, hlsFallback)
             return hlsFallback
         }
         if let lastReason { throw StreamError.unplayable(lastReason) }
@@ -191,14 +225,18 @@ final class StreamResolver: @unchecked Sendable {
 
     private func pick(_ formats: [JObj], quality: AudioQuality) -> JObj? {
         let sorted = formats.sorted { ($0.int("bitrate") ?? 0) > ($1.int("bitrate") ?? 0) }
+        let aac = sorted.filter { ($0.s("mimeType") ?? "").hasPrefix("audio/mp4") }
+        let opus = sorted.filter { ($0.s("mimeType") ?? "").hasPrefix("audio/webm") }
         switch quality {
-        case .high: return sorted.first
+        case .aac256: return aac.first { $0.int("itag") == 141 } ?? opus.first ?? aac.first
+        case .opus: return opus.first ?? aac.first
+        case .high: return aac.first
         case .normal: return sorted.first { $0.int("itag") == 140 } ?? sorted.first
         case .low: return sorted.last
         }
     }
 
-    private func player(videoId: String, client: Client, visitorData: String?) async throws -> JObj {
+    private func player(videoId: String, client: Client, visitorData: String?, signedIn: Bool = false) async throws -> JObj {
         var url = URLComponents(string: "\(client.host)/youtubei/v1/player")!
         url.queryItems = [URLQueryItem(name: "prettyPrint", value: "false")]
         var request = URLRequest(url: url.url!)
@@ -209,6 +247,14 @@ final class StreamResolver: @unchecked Sendable {
         request.setValue(client.id, forHTTPHeaderField: "X-YouTube-Client-Name")
         request.setValue(client.version, forHTTPHeaderField: "X-YouTube-Client-Version")
         if let visitorData { request.setValue(visitorData, forHTTPHeaderField: "X-Goog-Visitor-Id") }
+        if signedIn, let cookie = InnerTube.shared.cookie, let sapisid = InnerTube.sapisid(from: cookie) {
+            let origin = "https://www.youtube.com"
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+            request.setValue(InnerTube.sapisidHash(sapisid, origin: origin), forHTTPHeaderField: "Authorization")
+            request.setValue(origin, forHTTPHeaderField: "Origin")
+            request.setValue(origin, forHTTPHeaderField: "X-Origin")
+            request.setValue(InnerTube.shared.scope?.authUser ?? "0", forHTTPHeaderField: "X-Goog-AuthUser")
+        }
 
         var ctx: JObj = client.extra
         ctx["clientName"] = client.name
