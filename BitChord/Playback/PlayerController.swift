@@ -426,8 +426,29 @@ final class PlayerController {
             MainActor.assumeIsolated { self?.itemEnded(player: player) }
         }
         endObservers.append(token)
+        let failed = NotificationCenter.default.addObserver(forName: AVPlayerItem.failedToPlayToEndTimeNotification,
+                                                            object: item, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.itemFailed(player: player) }
+        }
+        endObservers.append(failed)
         if endObservers.count > 8 {
             NotificationCenter.default.removeObserver(endObservers.removeFirst())
+        }
+    }
+
+    @ObservationIgnored private var recoveryAttempts: [String: Int] = [:]
+
+    /// The stream broke mid-song: fetch a fresh link and resume where it stopped, once.
+    private func itemFailed(player: Int) {
+        guard player == active, let song = current else { return }
+        let tries = recoveryAttempts[song.videoId, default: 0]
+        if tries < 2 {
+            recoveryAttempts[song.videoId] = tries + 1
+            StreamResolver.shared.invalidate(song.videoId)
+            loadCurrent(autoplay: true, resumeAt: position)
+        } else {
+            errorMessage = "\(song.title) stopped streaming. Skipping."
+            if hasNext { next() } else { pause() }
         }
     }
 

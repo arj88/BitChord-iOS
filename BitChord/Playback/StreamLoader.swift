@@ -114,7 +114,21 @@ final class StreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Se
         lock.lock(); let cached = chunks[start]; lock.unlock()
         if let cached { return cached }
         let end = min(total, start + size) - 1
-        let (data, _) = try await fetch(range: start...end)
+        var attempt = 0
+        var data = Data()
+        while true {
+            do {
+                (data, _) = try await fetch(range: start...end)
+                break
+            } catch let error as StreamError {
+                throw error
+            } catch {
+                // Timeouts and dropped connections: try the same range again.
+                attempt += 1
+                if attempt >= 3 || Task.isCancelled { throw error }
+                try await Task.sleep(nanoseconds: UInt64(attempt) * 600_000_000)
+            }
+        }
         lock.lock(); chunks[start] = data; lock.unlock()
         return data
     }
@@ -136,7 +150,12 @@ final class StreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Se
             if !refreshed {
                 refreshed = true
                 StreamResolver.shared.invalidate(videoId)
-                self.stream = try await StreamResolver.shared.resolve(videoId, forceFresh: true)
+                if Date().timeIntervalSince(stream.resolvedAt) < 10 * 60 {
+                    // A young URL refused: this client's links aren't trusted right now.
+                    StreamResolver.shared.bench(stream.clientName)
+                }
+                // Same itag, so the bytes already handed to the player still line up.
+                self.stream = try await StreamResolver.shared.resolve(videoId, forceFresh: true, itag: stream.itag)
                 return try await fetch(range: range)
             }
             throw StreamError.unplayable("YouTube refused the stream (HTTP \(http.statusCode))")

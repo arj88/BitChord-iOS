@@ -65,19 +65,23 @@ struct ArtworkImage: View {
     @State private var image: UIImage?
 
     var body: some View {
-        ZStack {
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .transition(.opacity)
-            } else {
-                Rectangle().fill(Color(UIColor.secondarySystemFill))
-                Image(systemName: placeholderIcon)
-                    .font(.system(size: 22, weight: .medium))
-                    .foregroundStyle(.tertiary)
+        // The rectangle takes exactly the space offered; the image only fills it as an
+        // overlay, so a scaled-to-fill picture can never widen the layout around it.
+        Rectangle()
+            .fill(Color(UIColor.secondarySystemFill))
+            .overlay {
+                if let image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .transition(.opacity)
+                } else {
+                    Image(systemName: placeholderIcon)
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                }
             }
-        }
+            .clipped()
         .clipShape(circle ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)))
         .overlay {
             if !circle {

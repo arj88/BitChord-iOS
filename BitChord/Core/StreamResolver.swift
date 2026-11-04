@@ -59,19 +59,34 @@ final class StreamResolver: @unchecked Sendable {
         var host = "https://www.youtube.com"
     }
 
+    /// Tried in order. VISIONOS serves whole files without a PoToken; ANDROID_VR's URLs
+    /// now stop after the first megabyte (googlevideo answers 403 past it), so it is only
+    /// a fallback and is always probed past that boundary before use.
     static let clients: [Client] = [
+        Client(name: "VISIONOS", id: "101", version: "1.02",
+               userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+               extra: ["deviceMake": "Apple", "deviceModel": "RealityDevice14,1", "osName": "visionOS", "osVersion": "2.6"]),
         Client(name: "ANDROID_VR", id: "28", version: "1.65.10",
                userAgent: "com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip",
                extra: ["deviceMake": "Oculus", "deviceModel": "Quest 3", "androidSdkVersion": 32,
                        "osName": "Android", "osVersion": "12L"]),
-        Client(name: "ANDROID_VR", id: "28", version: "1.43.32",
-               userAgent: "com.google.android.apps.youtube.vr.oculus/1.43.32 (Linux; U; Android 12; en_US; Quest 3; Build/SQ3A.220605.009.A1; Cronet/107.0.5284.2)",
-               extra: ["deviceMake": "Oculus", "deviceModel": "Quest 3", "androidSdkVersion": 32,
-                       "osName": "Android", "osVersion": "12"]),
         Client(name: "IOS", id: "5", version: "21.26.4",
                userAgent: "com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
                extra: ["deviceMake": "Apple", "deviceModel": "iPhone16,2", "osName": "iPhone", "osVersion": "18.3.2.22D82"]),
     ]
+
+    /// Clients whose URLs were refused mid-play, benched for a while.
+    private var benched: [String: Date] = [:]
+
+    func bench(_ clientName: String) {
+        lock.lock(); benched[clientName] = Date().addingTimeInterval(30 * 60); lock.unlock()
+    }
+
+    private func isBenched(_ clientName: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard let until = benched[clientName] else { return false }
+        return until > Date()
+    }
 
     var quality: AudioQuality = .high
     private let lock = NSLock()
@@ -81,7 +96,9 @@ final class StreamResolver: @unchecked Sendable {
         lock.lock(); cache[videoId] = nil; lock.unlock()
     }
 
-    func resolve(_ videoId: String, forceFresh: Bool = false) async throws -> ResolvedStream {
+    /// - Parameter itag: when set (re-resolving mid-play), only that exact format will do,
+    ///   because the bytes already played came from it.
+    func resolve(_ videoId: String, forceFresh: Bool = false, itag: Int? = nil) async throws -> ResolvedStream {
         if !forceFresh {
             if let hit = cached(videoId), hit.isFresh { return hit }
         }
@@ -90,7 +107,8 @@ final class StreamResolver: @unchecked Sendable {
         var lastReason: String?
         var hlsFallback: ResolvedStream?
 
-        for client in Self.clients {
+        let usable = Self.clients.filter { !isBenched($0.name) }
+        for client in usable.isEmpty ? Self.clients : usable {
             do {
                 let json = try await player(videoId: videoId, client: client, visitorData: visitor)
                 let status = json.o("playabilityStatus")?.s("status") ?? ""
@@ -102,8 +120,9 @@ final class StreamResolver: @unchecked Sendable {
                 }
                 let streaming = json.o("streamingData")
                 let loudness = json.o("playerConfig")?.o("audioConfig")?.double("loudnessDb")
-                let formats = (streaming?.a("adaptiveFormats") ?? []).objects
+                var formats = (streaming?.a("adaptiveFormats") ?? []).objects
                     .filter { ($0.s("mimeType") ?? "").hasPrefix("audio/mp4") && $0.s("url") != nil }
+                if let itag { formats = formats.filter { $0.int("itag") == itag } }
                 if let format = pick(formats) {
                     let urlString = format.s("url")!
                     guard let url = URL(string: urlString) else { continue }
@@ -113,6 +132,12 @@ final class StreamResolver: @unchecked Sendable {
                         bitrate: format.int("bitrate") ?? 0, contentLength: length,
                         headers: ["User-Agent": client.userAgent],
                         loudnessDb: loudness, clientName: client.name, itag: format.int("itag") ?? 0)
+                    // Read past the 1 MiB mark before trusting the URL: some clients'
+                    // URLs serve the opening and refuse everything after it.
+                    guard await Self.probe(stream) else {
+                        lastReason = "YouTube refused the \(client.name) stream"
+                        continue
+                    }
                     store(videoId, stream)
                     return stream
                 }
@@ -125,12 +150,27 @@ final class StreamResolver: @unchecked Sendable {
                 lastReason = error.localizedDescription
             }
         }
-        if let hlsFallback {
+        if let hlsFallback, itag == nil {
             store(videoId, hlsFallback)
             return hlsFallback
         }
         if let lastReason { throw StreamError.unplayable(lastReason) }
         throw StreamError.noAudio
+    }
+
+    static let authBoundary: Int64 = 1024 * 1024
+
+    /// True when the URL serves bytes beyond the first megabyte.
+    static func probe(_ stream: ResolvedStream) async -> Bool {
+        let length = stream.contentLength ?? 0
+        let start: Int64 = length > authBoundary + 65_536 ? authBoundary + 4096 : 0
+        var request = URLRequest(url: stream.url)
+        request.timeoutInterval = 8
+        for (k, v) in stream.headers { request.setValue(v, forHTTPHeaderField: k) }
+        request.setValue("bytes=\(start)-\(start + 16_383)", forHTTPHeaderField: "Range")
+        guard let (data, response) = try? await InnerTube.shared.session.data(for: request),
+              let http = response as? HTTPURLResponse else { return false }
+        return (200..<300).contains(http.statusCode) && !data.isEmpty
     }
 
     private func cached(_ id: String) -> ResolvedStream? {

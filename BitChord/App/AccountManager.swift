@@ -24,37 +24,52 @@ final class AccountManager {
 
     /// Called by the login web view once Google has handed back to music.youtube.com.
     func signIn(cookies: [HTTPCookie]) async {
-        let relevant = cookies.filter { $0.domain.contains("youtube.com") || $0.domain.contains("google.com") }
+        // Only what a browser would send to music.youtube.com: cookies set for
+        // youtube.com or music.youtube.com, never Google's own accounts cookies.
+        let host = "music.youtube.com"
+        let applicable = cookies.filter { c in
+            let domain = c.domain.hasPrefix(".") ? String(c.domain.dropFirst()) : c.domain
+            return host == domain || host.hasSuffix("." + domain)
+        }
         var seen = Set<String>()
         var parts: [String] = []
-        // youtube.com cookies win over google.com ones of the same name.
-        for c in relevant.sorted(by: { $0.domain.contains("youtube.com") && !$1.domain.contains("youtube.com") }) where seen.insert(c.name).inserted {
+        // The most specific domain wins when a name is set twice.
+        for c in applicable.sorted(by: { $0.domain.count > $1.domain.count }) where seen.insert(c.name).inserted {
             parts.append("\(c.name)=\(c.value)")
         }
         let header = parts.joined(separator: "; ")
-        guard header.contains("SAPISID") else {
-            lastError = "Sign-in didn't finish — no YouTube session cookie was found."
+        guard InnerTube.sapisid(from: header) != nil else {
+            lastError = "Sign-in didn't finish — no YouTube session cookie was found. Try again."
             return
         }
+        lastError = nil
         InnerTube.shared.cookie = header
         Keychain.set(header, for: "ytm_cookie")
         await refreshProfile()
-        await syncLikes()
+        if account != nil { await syncLikes() }
     }
 
     func signOut() async {
         InnerTube.shared.cookie = nil
         Keychain.set(nil, for: "ytm_cookie")
         account = nil
+        lastError = nil
         let store = WKWebsiteDataStore.default()
         let records = await store.dataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes())
         await store.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), for: records)
     }
 
     func refreshProfile() async {
+        guard isSignedIn else { return }
+        let scope = await InnerTube.shared.ensureSessionScope(force: true)
+        if scope?.loggedIn == false {
+            account = nil
+            lastError = "YouTube didn't accept this sign-in. Sign out and sign in again."
+            return
+        }
         do {
             account = try await YTMusic.account()
-            if account == nil { lastError = "Signed in, but YouTube Music didn't return a profile." }
+            lastError = account == nil ? "Signed in, but YouTube Music didn't return a profile. Sign out and sign in again." : nil
         } catch {
             lastError = error.localizedDescription
         }

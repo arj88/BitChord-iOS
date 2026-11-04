@@ -20,7 +20,6 @@ struct NowPlayingView: View {
     var body: some View {
         GeometryReader { geo in
             ZStack {
-                PlayerBackground(colors: colors, artworkURL: player.current?.artworkURL(544), animated: settings.animatedBackground)
                 VStack(spacing: 0) {
                     topBar
                     switch mode {
@@ -43,6 +42,11 @@ struct NowPlayingView: View {
                 }
                 .padding(.horizontal, 24)
                 .foregroundStyle(.white)
+                .frame(width: geo.size.width, height: geo.size.height)
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .background {
+                PlayerBackground(colors: colors, artworkURL: player.current?.artworkURL(544), animated: settings.animatedBackground)
             }
             .offset(y: dragOffset)
             .gesture(
@@ -261,7 +265,6 @@ struct PlayerBackground: View {
         ZStack {
             Color.black
             ArtworkImage(url: artworkURL, cornerRadius: 0)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .blur(radius: 70)
                 .scaleEffect(1.6)
                 .opacity(0.9)
@@ -276,6 +279,7 @@ struct PlayerBackground: View {
             }
             Color.black.opacity(0.22)
         }
+        .clipped()
         .ignoresSafeArea()
     }
 

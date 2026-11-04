@@ -36,6 +36,8 @@ final class LibraryStore {
     private(set) var downloads: [Song] = []
     private(set) var localSongs: [Song] = []
     var downloadStates: [String: DownloadState] = [:]
+    /// Songs queued, downloading or failed, so the list can show titles.
+    private(set) var pendingDownloads: [String: Song] = [:]
 
     private struct Snapshot: Codable {
         var liked: [Song] = []
@@ -205,6 +207,7 @@ final class LibraryStore {
     func download(_ songs: [Song]) {
         for song in songs where !song.isLocal && downloadStates[song.videoId] != .done && downloadTasks[song.videoId] == nil {
             downloadStates[song.videoId] = .queued
+            pendingDownloads[song.videoId] = song
             downloadTasks[song.videoId] = Task { [weak self] in
                 await self?.performDownload(song)
             }
@@ -225,6 +228,7 @@ final class LibraryStore {
                 }
             }
             downloadStates[id] = .done
+            pendingDownloads[id] = nil
             downloads.removeAll { $0.videoId == id }
             downloads.insert(song, at: 0)
             ArtworkStore.prefetch(song.artwork(544))
@@ -239,6 +243,13 @@ final class LibraryStore {
         downloadTasks[song.videoId]?.cancel()
         downloadTasks[song.videoId] = nil
         downloadStates[song.videoId] = nil
+        pendingDownloads[song.videoId] = nil
+    }
+
+    func retryDownload(_ song: Song) {
+        downloadTasks[song.videoId] = nil
+        downloadStates[song.videoId] = nil
+        download([song])
     }
 
     func removeDownload(_ song: Song) {

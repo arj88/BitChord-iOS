@@ -33,6 +33,17 @@ final class InnerTube: @unchecked Sendable {
     private var _visitorData: String?
     private var _cookie: String?
     private var _dataSyncId: String?
+    private var _scope: SessionScope?
+    private var visitorIsSessionBound = false
+
+    /// Who the cookie acts as, read from the signed-in music.youtube.com page.
+    struct SessionScope {
+        var loggedIn: Bool
+        var dataSyncId: String?
+        var pageId: String?
+        var authUser: String
+        var clientVersion: String?
+    }
 
     var language: String = Locale.preferredLanguages.first.map { String($0.prefix(2)) } ?? "en"
     var region: String = {
@@ -59,7 +70,14 @@ final class InnerTube: @unchecked Sendable {
     /// The music.youtube.com cookie header captured at sign-in, or nil for guests.
     var cookie: String? {
         get { lock.lock(); defer { lock.unlock() }; return _cookie }
-        set { lock.lock(); _cookie = newValue; _dataSyncId = nil; lock.unlock() }
+        set {
+            lock.lock()
+            _cookie = newValue
+            _dataSyncId = nil
+            _scope = nil
+            if visitorIsSessionBound { _visitorData = nil; visitorIsSessionBound = false }
+            lock.unlock()
+        }
     }
 
     var dataSyncId: String? {
@@ -67,7 +85,48 @@ final class InnerTube: @unchecked Sendable {
         set { lock.lock(); _dataSyncId = newValue; lock.unlock() }
     }
 
-    var isSignedIn: Bool { cookie?.contains("SAPISID") == true }
+    var isSignedIn: Bool { cookie.flatMap(Self.sapisid(from:)) != nil }
+
+    var scope: SessionScope? {
+        lock.lock(); defer { lock.unlock() }
+        return _scope
+    }
+
+    /// Reads the account index, channel and data-sync id out of the signed-in web shell,
+    /// exactly as BitChord's `fetchSessionScope` does. Without these YouTube answers
+    /// most signed-in requests as if nobody were signed in.
+    @discardableResult
+    func ensureSessionScope(force: Bool = false) async -> SessionScope? {
+        guard let cookie else { return nil }
+        if !force, let existing = scope { return existing }
+        var request = URLRequest(url: URL(string: Self.musicOrigin + "/")!)
+        request.setValue(Self.webUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("\(language),en;q=0.8", forHTTPHeaderField: "Accept-Language")
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        if let sapisid = Self.sapisid(from: cookie) {
+            request.setValue(Self.sapisidHash(sapisid), forHTTPHeaderField: "Authorization")
+        }
+        guard let (data, _) = try? await session.data(for: request),
+              let html = String(data: data, encoding: .utf8) else { return nil }
+        func config(_ key: String) -> String? { Self.shellValue(key, in: html) }
+        let loggedIn = config("LOGGED_IN") == "true"
+        let version = config("INNERTUBE_CLIENT_VERSION")
+        var result = SessionScope(loggedIn: loggedIn, dataSyncId: nil, pageId: nil, authUser: "0", clientVersion: version)
+        if loggedIn {
+            let pageId = config("DELEGATED_SESSION_ID")
+            var dataSync = config("DATASYNC_ID")
+            if let raw = dataSync, raw.contains("||") {
+                let parts = raw.components(separatedBy: "||")
+                dataSync = parts.count > 1 && !parts[1].isEmpty ? parts[1] : parts[0]
+            }
+            result.pageId = pageId
+            result.dataSyncId = pageId ?? dataSync
+            result.authUser = config("SESSION_INDEX") ?? "0"
+            if let v = config("VISITOR_DATA") { adoptSessionVisitor(v) }
+        }
+        store(result, for: cookie)
+        return result
+    }
 
     // MARK: - Visitor id
 
@@ -84,10 +143,32 @@ final class InnerTube: @unchecked Sendable {
         return visitorData
     }
 
+    private func adoptSessionVisitor(_ v: String) {
+        lock.lock(); _visitorData = v; visitorIsSessionBound = true; lock.unlock()
+    }
+
+    private func store(_ scope: SessionScope, for cookie: String) {
+        lock.lock(); if _cookie == cookie { _scope = scope }; lock.unlock()
+    }
+
+    /// A value from the page's `ytcfg`: `"KEY": "value"` or `"KEY": true`.
+    static func shellValue(_ key: String, in html: String) -> String? {
+        let pattern = "\"" + key + "\"\\s*:\\s*(?:\"([^\"]*)\"|([A-Za-z0-9_.-]+))"
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let m = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)) else { return nil }
+        for group in 1...2 {
+            if let r = Range(m.range(at: group), in: html), !html[r].isEmpty { return String(html[r]) }
+        }
+        return nil
+    }
+
     // MARK: - Core request
 
     func post(_ endpoint: String, body: JObj, anonymous: Bool = false, query: [String: String] = [:]) async throws -> JObj {
+        let cookie = anonymous ? nil : self.cookie
+        let scope = cookie == nil ? nil : await ensureSessionScope()
         if visitorData == nil { await ensureVisitorData() }
+        let clientVersion = scope?.clientVersion ?? Self.webRemixVersion
         var components = URLComponents(string: "\(Self.musicBase)/\(endpoint)")!
         var items = [URLQueryItem(name: "prettyPrint", value: "false")]
         for (k, v) in query { items.append(URLQueryItem(name: k, value: v)) }
@@ -101,13 +182,13 @@ final class InnerTube: @unchecked Sendable {
         request.setValue(Self.musicOrigin, forHTTPHeaderField: "X-Origin")
         request.setValue(Self.musicOrigin + "/", forHTTPHeaderField: "Referer")
         request.setValue("67", forHTTPHeaderField: "X-YouTube-Client-Name")
-        request.setValue(Self.webRemixVersion, forHTTPHeaderField: "X-YouTube-Client-Version")
+        request.setValue(clientVersion, forHTTPHeaderField: "X-YouTube-Client-Version")
         request.setValue("\(language),en;q=0.8", forHTTPHeaderField: "Accept-Language")
         if let v = visitorData { request.setValue(v, forHTTPHeaderField: "X-Goog-Visitor-Id") }
-        let cookie = anonymous ? nil : self.cookie
         if let cookie {
             request.setValue(cookie, forHTTPHeaderField: "Cookie")
-            request.setValue("0", forHTTPHeaderField: "X-Goog-AuthUser")
+            request.setValue(scope?.authUser ?? "0", forHTTPHeaderField: "X-Goog-AuthUser")
+            if let pageId = scope?.pageId { request.setValue(pageId, forHTTPHeaderField: "X-Goog-PageId") }
             if let sapisid = Self.sapisid(from: cookie) {
                 request.setValue(Self.sapisidHash(sapisid), forHTTPHeaderField: "Authorization")
             }
@@ -115,13 +196,13 @@ final class InnerTube: @unchecked Sendable {
 
         var client: JObj = [
             "clientName": "WEB_REMIX",
-            "clientVersion": Self.webRemixVersion,
+            "clientVersion": clientVersion,
             "hl": language,
             "gl": region,
         ]
         if let v = visitorData { client["visitorData"] = v }
         var user: JObj = ["lockedSafetyMode": false]
-        if cookie != nil, let id = dataSyncId { user["onBehalfOfUser"] = id }
+        if cookie != nil, scope?.loggedIn == true, let id = scope?.dataSyncId { user["onBehalfOfUser"] = id }
         var payload = body
         payload["context"] = ["client": client, "user": user, "request": ["useSsl": true]] as JObj
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)

@@ -201,13 +201,22 @@ struct SongCollectionView: View {
                 if !active.isEmpty {
                     Section("In Progress") {
                         ForEach(Array(active.keys).sorted(), id: \.self) { id in
-                            HStack {
-                                Text(id).font(.footnote.monospaced()).foregroundStyle(.secondary)
-                                Spacer()
-                                switch active[id] ?? .queued {
-                                case .downloading(let p): ProgressView(value: p).frame(width: 90)
-                                case .failed(let reason): Text(reason).font(.caption).foregroundStyle(.red).lineLimit(2)
-                                default: ProgressView()
+                            let song = library.pendingDownloads[id]
+                            HStack(spacing: 12) {
+                                ArtworkImage(url: song?.artworkURL(120), cornerRadius: 5).frame(width: 44, height: 44)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(song?.title ?? id).lineLimit(1)
+                                    switch active[id] ?? .queued {
+                                    case .downloading(let p): ProgressView(value: p)
+                                    case .failed(let reason): Text(reason).font(.caption).foregroundStyle(.red).lineLimit(2)
+                                    default: Text("Waiting…").font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .swipeActions {
+                                if let song {
+                                    Button(role: .destructive) { library.cancelDownload(song) } label: { Label("Remove", systemImage: "xmark") }
+                                    Button { library.retryDownload(song) } label: { Label("Retry", systemImage: "arrow.clockwise") }.tint(.blue)
                                 }
                             }
                         }
@@ -217,7 +226,7 @@ struct SongCollectionView: View {
         }
         .listStyle(.plain)
         .overlay {
-            if list.isEmpty && query.isEmpty {
+            if list.isEmpty && query.isEmpty && !(kind == .downloads && !library.pendingDownloads.isEmpty) {
                 ContentUnavailableView(emptyTitle, systemImage: emptyIcon, description: Text(emptyText))
             }
         }
