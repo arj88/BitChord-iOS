@@ -20,6 +20,7 @@ final class AccountManager {
         guard let cookie = Keychain.get("ytm_cookie") else { return }
         InnerTube.shared.cookie = cookie
         await refreshProfile()
+        if account != nil { await syncLikes() }
     }
 
     /// Called by the login web view once Google has handed back to music.youtube.com.
@@ -75,13 +76,24 @@ final class AccountManager {
         }
     }
 
-    /// Pulls the account's Liked Music into the local likes.
-    func syncLikes() async {
+    @ObservationIgnored private var lastLikeSync = Date.distantPast
+
+    /// Pulls the account's Liked Music so likes made on other devices show up here.
+    /// - Parameter force: skip the five-minute throttle (pull-to-refresh, the sync button).
+    func syncLikes(force: Bool = true) async {
         guard isSignedIn, !isSyncing else { return }
+        if !force && Date().timeIntervalSince(lastLikeSync) < 300 { return }
         isSyncing = true
         defer { isSyncing = false }
-        if let songs = try? await YTMusic.likedSongs() {
-            LibraryStore.shared.mergeLiked(songs)
+        do {
+            let songs = try await YTMusic.likedSongs()
+            let key = "likesSynced:" + (account?.handle ?? account?.name ?? "account")
+            let first = !UserDefaults.standard.bool(forKey: key)
+            LibraryStore.shared.syncLiked(from: songs, firstSync: first)
+            UserDefaults.standard.set(true, forKey: key)
+            lastLikeSync = Date()
+        } catch {
+            lastError = "Couldn't sync liked songs: \(error.localizedDescription)"
         }
     }
 }

@@ -42,9 +42,6 @@ struct SettingsView: View {
             }
 
             Section("Playback") {
-                Picker("Audio quality", selection: $settings.quality) {
-                    ForEach(AudioQuality.allCases) { Text($0.rawValue).tag($0) }
-                }
                 VStack(alignment: .leading) {
                     HStack {
                         Text("Crossfade")
@@ -56,6 +53,21 @@ struct SettingsView: View {
                 Toggle("Volume normalization", isOn: $settings.normalize)
                 Toggle("Autoplay similar songs", isOn: $settings.autoplay)
                 Toggle("Stats for nerds", isOn: $settings.showNerdStats)
+            }
+
+            Section {
+                Picker("Download quality", selection: $settings.downloadQuality) {
+                    Text("Maximum — AAC ~128 kbps").tag(AudioQuality.high)
+                    Text("Data saver — AAC ~48 kbps").tag(AudioQuality.low)
+                }
+                Picker("Streaming quality", selection: $settings.quality) {
+                    Text("Maximum — AAC ~128 kbps").tag(AudioQuality.high)
+                    Text("Data saver — AAC ~48 kbps").tag(AudioQuality.low)
+                }
+            } header: {
+                Text("Audio quality")
+            } footer: {
+                Text("Maximum is the highest-quality audio YouTube gives this app. Its 256 kbps AAC is reserved for Premium in the official apps, and its Opus streams are in a format iPhone can't play.")
             }
 
             Section("Lyrics") {

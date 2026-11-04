@@ -119,6 +119,7 @@ struct DetailView: View {
                     player.play(page.songs, source: page.title, shuffled: true)
                 }
                 .padding(.horizontal)
+                DownloadAllButton(songs: page.songs).padding(.horizontal)
             }
             if let description = page?.description, !description.isEmpty {
                 Text(description)

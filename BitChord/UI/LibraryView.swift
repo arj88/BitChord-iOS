@@ -180,6 +180,16 @@ struct SongCollectionView: View {
                     player.play(list, source: title, shuffled: true)
                 }
                 .listRowSeparator(.hidden)
+                if kind == .liked || kind == .history {
+                    DownloadAllButton(songs: list).listRowSeparator(.hidden)
+                }
+                if kind == .liked && account.isSyncing {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Syncing with YouTube Music…").font(.footnote).foregroundStyle(.secondary)
+                    }
+                    .listRowSeparator(.hidden)
+                }
             }
             ForEach(Array(list.enumerated()), id: \.element.id) { i, song in
                 SongRow(song: song) { player.play(list, startAt: i, source: title) }
@@ -232,6 +242,8 @@ struct SongCollectionView: View {
         }
         .searchable(text: $query, prompt: "Filter")
         .navigationTitle(title)
+        .task { if kind == .liked { await account.syncLikes(force: false) } }
+        .refreshable { if kind == .liked { await account.syncLikes() } }
         .toolbar {
             if kind == .history && !library.history.isEmpty {
                 Button("Clear") { library.clearHistory() }
@@ -299,6 +311,7 @@ struct LocalPlaylistView: View {
                         } shuffle: {
                             player.play(playlist.songs, source: playlist.name, shuffled: true)
                         }
+                        DownloadAllButton(songs: playlist.songs)
                     }
                 }
                 .frame(maxWidth: .infinity)

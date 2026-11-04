@@ -51,6 +51,10 @@ final class LibraryStore {
 
     private var saveTask: Task<Void, Never>?
     private var downloadTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored private var runningDownloads = 0
+    /// Like/unlike changes made here recently, so a sync doesn't undo them before
+    /// YouTube has caught up: videoId → (liked, when).
+    @ObservationIgnored private var recentLikeChanges: [String: (liked: Bool, at: Date)] = [:]
 
     nonisolated static var supportDirectory: URL {
         let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -100,6 +104,7 @@ final class LibraryStore {
     func toggleLike(_ song: Song) {
         let nowLiked = !isLiked(song)
         setLiked(song, nowLiked)
+        recentLikeChanges[song.videoId] = (nowLiked, Date())
         if InnerTube.shared.isSignedIn {
             Task { try? await InnerTube.shared.rate(videoId: song.videoId, status: nowLiked ? .like : .indifferent) }
         }
@@ -114,10 +119,28 @@ final class LibraryStore {
         persist()
     }
 
-    /// Merges the account's Liked Music into the local likes.
-    func mergeLiked(_ songs: [Song]) {
-        let known = Set(liked.map(\.videoId))
-        liked += songs.filter { !known.contains($0.videoId) }
+    /// Makes the local likes match the account's Liked Music (newest first).
+    ///
+    /// The first sync after signing in also keeps likes made on this iPhone before sign-in,
+    /// and sends them to YouTube. After that YouTube is the source of truth, except for
+    /// changes made here in the last ten minutes that it may not reflect yet.
+    func syncLiked(from server: [Song], firstSync: Bool) {
+        // An empty answer is far more likely a failed read than an account with no likes.
+        guard !server.isEmpty || liked.isEmpty else { return }
+        let serverIds = Set(server.map(\.videoId))
+        let cutoff = Date().addingTimeInterval(-600)
+        recentLikeChanges = recentLikeChanges.filter { $0.value.at > cutoff }
+        var result = server.filter { recentLikeChanges[$0.videoId]?.liked != false }
+        let keepLocal = liked.filter { song in
+            guard !serverIds.contains(song.videoId) else { return false }
+            return firstSync || recentLikeChanges[song.videoId]?.liked == true
+        }
+        if firstSync, InnerTube.shared.isSignedIn {
+            let toPush = keepLocal.filter { !$0.isLocal }.map(\.videoId)
+            Task { for id in toPush { try? await InnerTube.shared.rate(videoId: id, status: .like) } }
+        }
+        result.insert(contentsOf: keepLocal, at: 0)
+        liked = result
         persist()
     }
 
@@ -216,16 +239,26 @@ final class LibraryStore {
 
     private func performDownload(_ song: Song) async {
         let id = song.videoId
+        var song = song
         let destination = Self.downloadsDirectory.appendingPathComponent("\(id).m4a")
+        let quality = AppSettings.shared.downloadQuality
+        // Three at a time, so "Download all" on a big list doesn't flood the connection.
+        while runningDownloads >= 3 {
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            if Task.isCancelled { return }
+        }
+        runningDownloads += 1
+        defer { runningDownloads -= 1 }
         do {
-            if let cached = AudioCache.url(for: id) {
+            if quality == .high, let cached = AudioCache.url(for: id) {
                 try FileManager.default.createDirectory(at: Self.downloadsDirectory, withIntermediateDirectories: true)
                 try? FileManager.default.removeItem(at: destination)
                 try FileManager.default.copyItem(at: cached, to: destination)
             } else {
-                try await StreamLoader.download(videoId: id, to: destination) { progress in
+                let length = try await StreamLoader.download(videoId: id, to: destination, quality: quality) { progress in
                     Task { @MainActor in LibraryStore.shared.downloadStates[id] = .downloading(progress) }
                 }
+                if song.durationText == nil, let length { song.durationText = Self.format(length) }
             }
             downloadStates[id] = .done
             pendingDownloads[id] = nil
@@ -234,9 +267,25 @@ final class LibraryStore {
             ArtworkStore.prefetch(song.artwork(544))
             persist()
         } catch {
+            if Task.isCancelled { return }
             downloadStates[id] = .failed(error.localizedDescription)
         }
         downloadTasks[id] = nil
+    }
+
+    /// How many of `songs` are already on the device.
+    func downloadedCount(_ songs: [Song]) -> Int {
+        songs.filter { downloadStates[$0.videoId] == .done }.count
+    }
+
+    /// Songs from `songs` still downloading or queued.
+    func activeDownloads(_ songs: [Song]) -> Int {
+        songs.filter {
+            switch downloadStates[$0.videoId] {
+            case .queued, .downloading: return true
+            default: return false
+            }
+        }.count
     }
 
     func cancelDownload(_ song: Song) {

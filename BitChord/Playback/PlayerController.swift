@@ -211,6 +211,7 @@ final class PlayerController {
         let t = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
         players[active].seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
         position = seconds
+        endHandled = false
         updateNowPlaying()
         updatePresence()
     }
@@ -347,6 +348,8 @@ final class PlayerController {
                 let item = built.0
                 let gainValue = built.1
                 let info = built.2
+                self.knownDurations[self.active] = built.3
+                self.endHandled = false
                 guard generation == self.loadGeneration else { return }
                 self.gain[self.active] = gainValue
                 self.streamInfo = info
@@ -379,16 +382,16 @@ final class PlayerController {
     }
 
     /// Builds the AVPlayerItem for a song: local file, download, cache, or stream.
-    private func makeItem(for song: Song) async throws -> (AVPlayerItem, Float, String) {
+    private func makeItem(for song: Song) async throws -> (AVPlayerItem, Float, String, Double?) {
         if let name = song.localFile {
             let url = LibraryStore.importsDirectory.appendingPathComponent(name)
-            return (configured(AVPlayerItem(url: url)), 1, "Local file · \(url.pathExtension.uppercased())")
+            return (configured(AVPlayerItem(url: url)), 1, "Local file · \(url.pathExtension.uppercased())", nil)
         }
         if let url = LibraryStore.downloadURL(for: song.videoId) {
-            return (configured(AVPlayerItem(url: url)), 1, "Downloaded · AAC")
+            return (configured(AVPlayerItem(url: url)), 1, "Downloaded · AAC", song.durationSeconds)
         }
         if let url = AudioCache.url(for: song.videoId) {
-            return (configured(AVPlayerItem(url: url)), 1, "Cached · AAC")
+            return (configured(AVPlayerItem(url: url)), 1, "Cached · AAC", song.durationSeconds)
         }
         let stream = try await StreamResolver.shared.resolve(song.videoId)
         var g: Float = 1
@@ -397,13 +400,13 @@ final class PlayerController {
         }
         if stream.isHLS {
             let asset = AVURLAsset(url: stream.url, options: ["AVURLAssetHTTPHeaderFieldsKey": stream.headers])
-            return (configured(AVPlayerItem(asset: asset)), g, "HLS · \(stream.clientName)")
+            return (configured(AVPlayerItem(asset: asset)), g, "HLS · \(stream.clientName)", stream.durationSeconds)
         }
         loaders[song.videoId]?.cancelAll()
         let loader = StreamLoader(videoId: song.videoId, stream: stream)
         loaders[song.videoId] = loader
         trimLoaders()
-        return (configured(AVPlayerItem(asset: loader.makeAsset())), g, stream.codecDescription)
+        return (configured(AVPlayerItem(asset: loader.makeAsset())), g, stream.codecDescription, stream.durationSeconds ?? song.durationSeconds)
     }
 
     private func configured(_ item: AVPlayerItem) -> AVPlayerItem {
@@ -454,6 +457,7 @@ final class PlayerController {
 
     private func itemEnded(player: Int) {
         guard player == active, !fading else { return }
+        endHandled = true
         if stopAfterCurrent {
             stopAfterCurrent = false
             pause()
@@ -505,6 +509,7 @@ final class PlayerController {
             }
             let item = prepared.0
             let g = prepared.1
+            self.knownDurations[slot] = prepared.3
             guard self.preparedSongId == song.videoId, slot == self.standby else { return }
             self.gain[slot] = g
             self.players[slot].volume = 0
@@ -569,12 +574,27 @@ final class PlayerController {
         players[active].volume = gain[active]
     }
 
+    /// The real length of what each player holds, when YouTube told us (see ResolvedStream.durationSeconds).
+    @ObservationIgnored private var knownDurations: [Double?] = [nil, nil]
+    @ObservationIgnored private var endHandled = false
+
     private func tick(player: Int) {
         guard player == active, let item = players[active].currentItem else { return }
+        let itemDuration = CMTimeGetSeconds(item.duration)
+        if let known = knownDurations[active], known > 0 {
+            duration = known
+        } else if itemDuration.isFinite && itemDuration > 0 {
+            duration = itemDuration
+        }
         let t = CMTimeGetSeconds(players[active].currentTime())
-        if t.isFinite { position = t }
-        let d = CMTimeGetSeconds(item.duration)
-        if d.isFinite && d > 0 { duration = d }
+        if t.isFinite { position = duration > 0 ? min(t, duration) : t }
+        // AVPlayer overestimates these files' length and keeps "playing" silence past the
+        // end, so the end is called from the real duration rather than waiting for it.
+        if let known = knownDurations[active], known > 0, isPlaying, !fading, !endHandled, t.isFinite, t >= known - 0.2 {
+            endHandled = true
+            itemEnded(player: active)
+            return
+        }
         guard duration > 0, isPlaying else { return }
         let remaining = duration - position
 
@@ -630,6 +650,8 @@ final class PlayerController {
 
     private func songDidStart(beforeLoad: Bool = false) {
         guard let song = current else { return }
+        endHandled = false
+        if let known = knownDurations[active], known > 0 { duration = known }
         startedAt = Date()
         scrobbled = false
         lyricsOffset = 0

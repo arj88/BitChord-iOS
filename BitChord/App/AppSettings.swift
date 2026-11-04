@@ -26,6 +26,7 @@ final class AppSettings {
 
     var appearance: AppearanceMode { didSet { d.set(appearance.rawValue, forKey: "appearance") } }
     var quality: AudioQuality { didSet { d.set(quality.rawValue, forKey: "quality"); StreamResolver.shared.quality = quality } }
+    var downloadQuality: AudioQuality { didSet { d.set(downloadQuality.rawValue, forKey: "downloadQuality") } }
     var crossfade: Double { didSet { d.set(crossfade, forKey: "crossfade") } }
     var normalize: Bool { didSet { d.set(normalize, forKey: "normalize") } }
     var autoplay: Bool { didSet { d.set(autoplay, forKey: "autoplay") } }
@@ -52,6 +53,7 @@ final class AppSettings {
     private init() {
         appearance = AppearanceMode(rawValue: d.string(forKey: "appearance") ?? "") ?? .dark
         quality = AudioQuality(rawValue: d.string(forKey: "quality") ?? "") ?? .high
+        downloadQuality = AudioQuality(rawValue: d.string(forKey: "downloadQuality") ?? "") ?? .high
         crossfade = d.object(forKey: "crossfade") as? Double ?? 0
         normalize = d.object(forKey: "normalize") as? Bool ?? true
         autoplay = d.object(forKey: "autoplay") as? Bool ?? true

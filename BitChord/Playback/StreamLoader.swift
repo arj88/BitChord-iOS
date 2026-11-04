@@ -193,8 +193,11 @@ final class StreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Se
     }()
 
     /// Downloads the whole stream to a file (used by offline downloads).
-    static func download(videoId: String, to destination: URL, progress: @escaping (Double) -> Void) async throws {
-        var stream = try await StreamResolver.shared.resolve(videoId)
+    /// - Returns: the track's real length in seconds, when YouTube gave it.
+    @discardableResult
+    static func download(videoId: String, to destination: URL, quality: AudioQuality = .high,
+                         progress: @escaping (Double) -> Void) async throws -> Double? {
+        var stream = try await StreamResolver.shared.resolve(videoId, forceFresh: true, quality: quality)
         if stream.isHLS { throw StreamError.unplayable("This track can only be streamed") }
         let loader = StreamLoader(videoId: videoId, stream: stream)
         let total = try await loader.contentLength()
@@ -211,6 +214,7 @@ final class StreamLoader: NSObject, AVAssetResourceLoaderDelegate, @unchecked Se
         }
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         try data.write(to: destination, options: .atomic)
+        return stream.durationSeconds
     }
 }
 

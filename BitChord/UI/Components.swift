@@ -356,14 +356,62 @@ struct LoadingView: View {
 struct ErrorView: View {
     let message: String
     var retry: (() -> Void)?
+    @Environment(AppRouter.self) private var router
+    @Environment(LibraryStore.self) private var library
+
     var body: some View {
         ContentUnavailableView {
             Label("Couldn't load", systemImage: "wifi.exclamationmark")
         } description: {
             Text(message)
         } actions: {
-            if let retry { Button("Try Again", action: retry).buttonStyle(.bordered) }
+            HStack(spacing: 12) {
+                if let retry { Button("Try Again", action: retry).buttonStyle(.bordered) }
+                if !library.downloads.isEmpty {
+                    Button {
+                        router.tab = .library
+                        router.libraryPath = NavigationPath([Route.downloads])
+                    } label: {
+                        Label("Go to Downloads", systemImage: "arrow.down.circle.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
         }
+    }
+}
+
+/// One tap to save a whole list offline, with live progress.
+struct DownloadAllButton: View {
+    let songs: [Song]
+    @Environment(LibraryStore.self) private var library
+
+    var body: some View {
+        let downloadable = songs.filter { !$0.isLocal }
+        let done = library.downloadedCount(downloadable)
+        let active = library.activeDownloads(downloadable)
+        Button {
+            library.download(downloadable)
+        } label: {
+            HStack(spacing: 8) {
+                if active > 0 {
+                    ProgressView().controlSize(.small)
+                    Text("Downloading… \(done) of \(downloadable.count)")
+                } else if done == downloadable.count && done > 0 {
+                    Image(systemName: "checkmark.circle.fill")
+                    Text("All \(done) Downloaded")
+                } else {
+                    Image(systemName: "arrow.down.circle")
+                    Text(done > 0 ? "Download Remaining \(downloadable.count - done)" : "Download All \(downloadable.count)")
+                }
+            }
+            .font(.subheadline.weight(.semibold))
+            .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.large)
+        .tint(Theme.accent)
+        .disabled(downloadable.isEmpty || active > 0 || done == downloadable.count)
     }
 }
 

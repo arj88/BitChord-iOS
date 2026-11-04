@@ -16,6 +16,8 @@ struct ResolvedStream {
     var itag: Int
     var isHLS: Bool = false
     var resolvedAt = Date()
+    /// The track's real length from YouTube (AVPlayer misreads it for these fragmented MP4s).
+    var durationSeconds: Double? = nil
 
     var isFresh: Bool { Date().timeIntervalSince(resolvedAt) < 20 * 60 }
 
@@ -98,7 +100,7 @@ final class StreamResolver: @unchecked Sendable {
 
     /// - Parameter itag: when set (re-resolving mid-play), only that exact format will do,
     ///   because the bytes already played came from it.
-    func resolve(_ videoId: String, forceFresh: Bool = false, itag: Int? = nil) async throws -> ResolvedStream {
+    func resolve(_ videoId: String, forceFresh: Bool = false, itag: Int? = nil, quality: AudioQuality? = nil) async throws -> ResolvedStream {
         if !forceFresh {
             if let hit = cached(videoId), hit.isFresh { return hit }
         }
@@ -123,15 +125,17 @@ final class StreamResolver: @unchecked Sendable {
                 var formats = (streaming?.a("adaptiveFormats") ?? []).objects
                     .filter { ($0.s("mimeType") ?? "").hasPrefix("audio/mp4") && $0.s("url") != nil }
                 if let itag { formats = formats.filter { $0.int("itag") == itag } }
-                if let format = pick(formats) {
+                if let format = pick(formats, quality: quality ?? self.quality) {
                     let urlString = format.s("url")!
                     guard let url = URL(string: urlString) else { continue }
                     let length = format.s("contentLength").flatMap { Int64($0) }
-                    let stream = ResolvedStream(
+                    var stream = ResolvedStream(
                         url: url, mimeType: format.s("mimeType") ?? "audio/mp4",
                         bitrate: format.int("bitrate") ?? 0, contentLength: length,
                         headers: ["User-Agent": client.userAgent],
                         loudnessDb: loudness, clientName: client.name, itag: format.int("itag") ?? 0)
+                    stream.durationSeconds = format.double("approxDurationMs").map { $0 / 1000 }
+                        ?? json.o("videoDetails")?.double("lengthSeconds")
                     // Read past the 1 MiB mark before trusting the URL: some clients'
                     // URLs serve the opening and refuse everything after it.
                     guard await Self.probe(stream) else {
@@ -185,7 +189,7 @@ final class StreamResolver: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func pick(_ formats: [JObj]) -> JObj? {
+    private func pick(_ formats: [JObj], quality: AudioQuality) -> JObj? {
         let sorted = formats.sorted { ($0.int("bitrate") ?? 0) > ($1.int("bitrate") ?? 0) }
         switch quality {
         case .high: return sorted.first

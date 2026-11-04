@@ -72,6 +72,7 @@ struct BitChordApp: App {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { player.persistNow() }
+            if phase == .active { Task { await account.syncLikes(force: false) } }
         }
     }
 }
