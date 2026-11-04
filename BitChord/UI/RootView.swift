@@ -37,6 +37,10 @@ struct RootView: View {
         }
         .fullScreenCover(isPresented: $router.showPlayer) {
             NowPlayingView()
+                .sheet(isPresented: $router.showParty) { ListenTogetherView() }
+        }
+        .sheet(isPresented: Binding(get: { router.showParty && !router.showPlayer }, set: { router.showParty = $0 })) {
+            ListenTogetherView()
         }
         .sheet(isPresented: Binding(get: { router.addToPlaylist != nil }, set: { if !$0 { router.addToPlaylist = nil } })) {
             AddToPlaylistSheet(songs: router.addToPlaylist ?? [])
@@ -47,6 +51,7 @@ struct RootView: View {
 /// The bar above the tab bar showing the current track.
 struct MiniPlayer: View {
     @Environment(PlayerController.self) private var player
+    @Environment(ListenTogether.self) private var party
     @Environment(AppRouter.self) private var router
 
     var body: some View {
@@ -56,7 +61,10 @@ struct MiniPlayer: View {
                     .frame(width: 44, height: 44)
                     .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(song.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    HStack(spacing: 4) {
+                        if party.isActive { Image(systemName: "person.2.fill").font(.caption2).foregroundStyle(Theme.accent) }
+                        Text(song.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    }
                     Text(song.artist).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 8)

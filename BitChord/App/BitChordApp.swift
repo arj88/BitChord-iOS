@@ -14,6 +14,7 @@ final class AppRouter {
     var libraryPath = NavigationPath()
     var searchPath = NavigationPath()
     var showPlayer = false
+    var showParty = false
     var addToPlaylist: [Song]?
 
     func open(_ route: Route) {
@@ -28,6 +29,12 @@ final class AppRouter {
 
     /// Handles music.youtube.com / youtube.com links opened into the app.
     func handle(url: URL, player: PlayerController) {
+        // Party invites: bitchord://invite/CODE or a pasted https://…/invite/CODE link.
+        if url.absoluteString.contains("invite/"), let code = Party.normaliseCode(url.absoluteString) {
+            showParty = true
+            Task { await ListenTogether.shared.join(code) }
+            return
+        }
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
         let pairs: [(String, String)] = (components.queryItems ?? []).compactMap { item in
             guard let value = item.value else { return nil }
@@ -55,6 +62,7 @@ struct BitChordApp: App {
     @State private var settings = AppSettings.shared
     @State private var router = AppRouter()
     @State private var account = AccountManager.shared
+    @State private var party = ListenTogether.shared
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -65,6 +73,7 @@ struct BitChordApp: App {
                 .environment(settings)
                 .environment(router)
                 .environment(account)
+                .environment(party)
                 .preferredColorScheme(settings.appearance.colorScheme)
                 .tint(Theme.accent)
                 .onOpenURL { router.handle(url: $0, player: player) }
@@ -72,7 +81,10 @@ struct BitChordApp: App {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .background { player.persistNow() }
-            if phase == .active { Task { await account.syncLikes(force: false) } }
+            if phase == .active {
+                Task { await account.syncLikes(force: false) }
+                party.appBecameActive()
+            }
         }
     }
 }

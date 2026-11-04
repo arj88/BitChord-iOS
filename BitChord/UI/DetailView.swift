@@ -13,6 +13,14 @@ struct DetailView: View {
     @State private var error: String?
     @State private var loadingMore = false
     @State private var showDescription = false
+    @State private var renaming = false
+    @State private var newName = ""
+    @State private var confirmDelete = false
+    @State private var editError: String?
+    @Environment(\.dismiss) private var dismiss
+
+    /// One of the signed-in account's own playlists, which it can edit.
+    private var editable: Bool { (page?.isEditable ?? false) && InnerTube.shared.isSignedIn }
 
     var body: some View {
         List {
@@ -30,9 +38,18 @@ struct DetailView: View {
                             .tint(.indigo)
                     }
                     .swipeActions(edge: .trailing) {
+                        if editable, song.setVideoId != nil {
+                            Button(role: .destructive) { Task { await removeFromPlaylist(song) } } label: {
+                                Label("Remove", systemImage: "trash")
+                            }
+                        }
                         Button { player.addToQueue([song]) } label: { Label("Queue", systemImage: "text.line.last.and.arrowtriangle.forward") }
                             .tint(.orange)
                     }
+                }
+                .onMove(perform: editable && page.continuation == nil ? { from, to in Task { await move(from: from, to: to) } } : nil)
+                if let editError {
+                    Text(editError).font(.footnote).foregroundStyle(.red)
                 }
                 if page.continuation != nil {
                     ProgressView().frame(maxWidth: .infinity).onAppear { Task { await loadMore() } }
@@ -52,10 +69,21 @@ struct DetailView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     if let page {
-                        Button { library.toggleSaved(item(page)) } label: {
+                        if editable {
+                            Section("Your YouTube playlist") {
+                                Button { newName = page.title; renaming = true } label: { Label("Rename", systemImage: "pencil") }
+                                Menu {
+                                    ForEach(["PUBLIC": "Public", "UNLISTED": "Unlisted", "PRIVATE": "Private"].sorted(by: { $0.key > $1.key }), id: \.key) { key, label in
+                                        Button(label) { Task { await setPrivacy(key) } }
+                                    }
+                                } label: { Label("Privacy", systemImage: "lock") }
+                                Button(role: .destructive) { confirmDelete = true } label: { Label("Delete Playlist", systemImage: "trash") }
+                            }
+                        }
+                        Button { toggleSaved(page) } label: {
                             library.isSaved(browseId) ? Label("Remove from Library", systemImage: "minus.circle") : Label("Add to Library", systemImage: "plus")
                         }
-                        Button { library.download(page.songs) } label: { Label("Download All", systemImage: "arrow.down.circle") }
+                        Button { Task { library.download(await allSongs()) } } label: { Label("Download All", systemImage: "arrow.down.circle") }
                         Button { player.addToQueue(page.songs) } label: { Label("Add to Queue", systemImage: "text.badge.plus") }
                         Button { router.addToPlaylist = page.songs } label: { Label("Add to Playlist…", systemImage: "music.note.list") }
                         if let first = page.songs.first {
@@ -71,6 +99,82 @@ struct DetailView: View {
         }
         .task { if page == nil { await load() } }
         .refreshable { await load() }
+        .alert("Rename Playlist", isPresented: $renaming) {
+            TextField("Name", text: $newName)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") { Task { await rename() } }
+        }
+        .confirmationDialog("Delete this playlist from your YouTube account?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Delete Playlist", role: .destructive) { Task { await deletePlaylist() } }
+        }
+    }
+
+    // MARK: Editing (the account's own playlists)
+
+    private var playlistId: String { page?.playlistId ?? InnerTube.bareId(browseId) }
+
+    private func run(_ action: () async throws -> Void) async {
+        do {
+            try await action()
+            editError = nil
+        } catch {
+            editError = error.localizedDescription
+        }
+    }
+
+    private func rename() async {
+        let name = newName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        await run {
+            try await InnerTube.shared.renamePlaylist(playlistId, title: name)
+            page?.title = name
+        }
+    }
+
+    private func setPrivacy(_ privacy: String) async {
+        await run { try await InnerTube.shared.setPlaylistPrivacy(playlistId, privacy: privacy) }
+        await load()
+    }
+
+    private func deletePlaylist() async {
+        await run {
+            try await InnerTube.shared.deletePlaylist(playlistId: playlistId)
+            dismiss()
+        }
+    }
+
+    private func removeFromPlaylist(_ song: Song) async {
+        guard let setVideoId = song.setVideoId else { return }
+        await run {
+            try await InnerTube.shared.removeFromPlaylist(playlistId: playlistId, videoId: song.videoId, setVideoId: setVideoId)
+            page?.songs.removeAll { $0.setVideoId == setVideoId }
+        }
+    }
+
+    private func move(from source: IndexSet, to destination: Int) async {
+        guard var songs = page?.songs, let from = source.first, let moved = songs[from].setVideoId else { return }
+        songs.move(fromOffsets: source, toOffset: destination)
+        let newIndex = songs.firstIndex { $0.setVideoId == moved } ?? 0
+        let successor = newIndex + 1 < songs.count ? songs[newIndex + 1].setVideoId : nil
+        let previous = page?.songs
+        page?.songs = songs
+        await run {
+            do {
+                try await InnerTube.shared.movePlaylistItem(playlistId, setVideoId: moved, before: successor)
+            } catch {
+                page?.songs = previous ?? songs
+                throw error
+            }
+        }
+    }
+
+    /// Saving a page also saves it to the YouTube account when signed in.
+    private func toggleSaved(_ page: DetailPage) {
+        let saving = !library.isSaved(browseId)
+        library.toggleSaved(item(page))
+        if InnerTube.shared.isSignedIn, let id = page.playlistId, !page.isEditable {
+            Task { try? await InnerTube.shared.ratePlaylist(playlistId: id, saved: saving) }
+        }
     }
 
     private func item(_ page: DetailPage) -> ShelfItem {
@@ -114,12 +218,20 @@ struct DetailView: View {
             .padding(.horizontal)
             if let page, !page.songs.isEmpty {
                 PlayShuffleButtons {
+                    // Start right away with what's loaded; the rest joins the queue once fetched.
                     player.play(page.songs, source: page.title)
+                    if page.continuation != nil {
+                        Task {
+                            let all = await allSongs()
+                            player.addToQueue(Array(all.dropFirst(page.songs.count)))
+                        }
+                    }
                 } shuffle: {
-                    player.play(page.songs, source: page.title, shuffled: true)
+                    Task { player.play(await allSongs(), source: page.title, shuffled: true) }
                 }
                 .padding(.horizontal)
-                DownloadAllButton(songs: page.songs).padding(.horizontal)
+                DownloadAllButton(songs: page.songs, loadAll: page.continuation == nil ? nil : { await allSongs() })
+                    .padding(.horizontal)
             }
             if let description = page?.description, !description.isEmpty {
                 Text(description)
@@ -155,6 +267,17 @@ struct DetailView: View {
         } catch {
             if page == nil { self.error = error.localizedDescription }
         }
+    }
+
+    /// Every song of the page, fetching any pages not loaded yet (and showing them too).
+    private func allSongs() async -> [Song] {
+        while let token = page?.continuation {
+            guard let more = try? await YTMusic.moreSongs(token) else { break }
+            let known = Set(page?.songs.map(\.videoId) ?? [])
+            page?.songs += more.songs.filter { !known.contains($0.videoId) }
+            page?.continuation = more.songs.isEmpty ? nil : more.continuation
+        }
+        return page?.songs ?? []
     }
 
     private func loadMore() async {

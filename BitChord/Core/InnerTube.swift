@@ -317,6 +317,44 @@ final class InnerTube: @unchecked Sendable {
         return id
     }
 
+    /// One or more playlist edits applied together. YouTube answers a refused edit with
+    /// HTTP 200 and a non-success status, so the body is checked too.
+    @discardableResult
+    func editPlaylist(_ playlistId: String, actions: [JObj]) async throws -> JObj {
+        guard isSignedIn else { throw InnerTubeError.notSignedIn }
+        let response = try await post("browse/edit_playlist", body: ["playlistId": Self.bareId(playlistId), "actions": actions])
+        if let status = response.s("status"), status != "STATUS_SUCCEEDED" {
+            throw InnerTubeError.api("YouTube Music refused the edit (\(status))")
+        }
+        return response
+    }
+
+    func renamePlaylist(_ playlistId: String, title: String) async throws {
+        try await editPlaylist(playlistId, actions: [["action": "ACTION_SET_PLAYLIST_NAME", "playlistName": title]])
+    }
+
+    func setPlaylistDescription(_ playlistId: String, description: String) async throws {
+        try await editPlaylist(playlistId, actions: [["action": "ACTION_SET_PLAYLIST_DESCRIPTION", "playlistDescription": description]])
+    }
+
+    /// privacy: "PUBLIC", "UNLISTED" or "PRIVATE".
+    func setPlaylistPrivacy(_ playlistId: String, privacy: String) async throws {
+        try await editPlaylist(playlistId, actions: [["action": "ACTION_SET_PLAYLIST_PRIVACY", "playlistPrivacy": privacy]])
+    }
+
+    /// Moves the entry `setVideoId` to just before `before` (or to the end when nil).
+    func movePlaylistItem(_ playlistId: String, setVideoId: String, before: String?) async throws {
+        var action: JObj = ["action": "ACTION_MOVE_VIDEO_BEFORE", "setVideoId": setVideoId]
+        if let before { action["movedSetVideoIdSuccessor"] = before }
+        try await editPlaylist(playlistId, actions: [action])
+    }
+
+    /// Sends a feedback token — how "Remove from history" and library toggles are done.
+    func sendFeedback(_ token: String) async throws {
+        guard isSignedIn else { throw InnerTubeError.notSignedIn }
+        _ = try await post("feedback", body: ["feedbackTokens": [token]])
+    }
+
     func addToPlaylist(playlistId: String, videoIds: [String]) async throws {
         guard isSignedIn else { throw InnerTubeError.notSignedIn }
         let actions: [JObj] = videoIds.map { ["action": "ACTION_ADD_VIDEO", "addedVideoId": $0, "dedupeOption": "DEDUPE_OPTION_SKIP"] }

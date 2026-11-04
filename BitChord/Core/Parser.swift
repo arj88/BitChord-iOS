@@ -642,6 +642,32 @@ enum Parser {
         return (out, continuationToken(json))
     }
 
+    /// The "Remove from history" token in a row's menu (its DELETE item).
+    static func historyRemoveToken(_ row: JObj) -> String? {
+        for item in (row.o("menu")?.o("menuRenderer")?.a("items") ?? []).objects {
+            guard let service = item.o("menuServiceItemRenderer"),
+                  service.o("icon")?.s("iconType") == "DELETE" else { continue }
+            if let token = service.o("serviceEndpoint")?.o("feedbackEndpoint")?.s("feedbackToken") { return token }
+        }
+        return nil
+    }
+
+    /// The account's history page: one shelf per day, each row removable.
+    static func history(_ json: JObj) -> [HistorySection] {
+        var out: [HistorySection] = []
+        for shelf in JSONWalk.collect(json, "musicShelfRenderer") {
+            let title = shelf.runs("title")
+            var songs: [Song] = []
+            for item in (shelf.a("contents") ?? []).objects {
+                guard let row = item.o("musicResponsiveListItemRenderer"), var song = song(fromRow: row) else { continue }
+                song.historyRemoveToken = historyRemoveToken(row)
+                songs.append(song)
+            }
+            if !songs.isEmpty { out.append(HistorySection(title: title.isEmpty ? "Earlier" : title, songs: songs)) }
+        }
+        return out
+    }
+
     static func songsDeep(_ json: JObj) -> [Song] {
         var out: [Song] = []
         var seen = Set<String>()

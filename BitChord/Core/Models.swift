@@ -21,6 +21,8 @@ struct Song: Codable, Hashable, Identifiable {
     var setVideoId: String?
     /// For songs imported from the device rather than YouTube.
     var localFile: String?
+    /// The token that removes this play from the account's YouTube history (history rows only).
+    var historyRemoveToken: String?
 
     var id: String { videoId }
 
@@ -209,6 +211,13 @@ struct WatchNext {
     var lyricsBrowseId: String?
     var relatedBrowseId: String?
     var continuation: String?
+}
+
+/// One day's block of the account's YouTube Music history ("Today", "Yesterday", …).
+struct HistorySection: Identifiable {
+    var title: String
+    var songs: [Song]
+    var id: String { title + (songs.first?.videoId ?? "") }
 }
 
 struct AccountInfo: Codable, Hashable {

@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct LibraryView: View {
+    @Environment(ListenTogether.self) private var party
     @Environment(LibraryStore.self) private var library
     @Environment(AccountManager.self) private var account
     @Environment(AppRouter.self) private var router
@@ -17,7 +18,13 @@ struct LibraryView: View {
                 NavigationLink(value: Route.downloads) { row("Downloads", "arrow.down.circle.fill", "\(library.downloads.count)") }
                 NavigationLink(value: Route.history) { row("History", "clock.fill", nil) }
                 NavigationLink(value: Route.localFiles) { row("On This iPhone", "iphone", "\(library.localSongs.count)") }
+                Button { router.showParty = true } label: {
+                    row("Listen Together", "person.2.wave.2.fill", party.code)
+                }
                 if account.isSignedIn {
+                    NavigationLink(value: Route.youtubeHistory) {
+                        row("YouTube History", "clock.arrow.circlepath", nil)
+                    }
                     NavigationLink(value: Route.accountLibrary(title: "YouTube Music Playlists", browseId: "FEmusic_liked_playlists")) {
                         row("YouTube Playlists", "music.note.list", nil)
                     }
@@ -347,6 +354,9 @@ struct AccountLibraryView: View {
     @State private var items: [ShelfItem] = []
     @State private var error: String?
     @State private var loaded = false
+    @State private var creating = false
+    @State private var newName = ""
+    @State private var privacy = "PRIVATE"
 
     var body: some View {
         List {
@@ -371,6 +381,31 @@ struct AccountLibraryView: View {
         .navigationTitle(title)
         .task { if !loaded { await load() } }
         .refreshable { await load() }
+        .toolbar {
+            if browseId == "FEmusic_liked_playlists" {
+                Button { newName = ""; creating = true } label: { Image(systemName: "plus") }
+            }
+        }
+        .alert("New YouTube Playlist", isPresented: $creating) {
+            TextField("Name", text: $newName)
+            Button("Private") { privacy = "PRIVATE"; Task { await create() } }
+            Button("Unlisted") { privacy = "UNLISTED"; Task { await create() } }
+            Button("Public") { privacy = "PUBLIC"; Task { await create() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Choose who can see it.")
+        }
+    }
+
+    private func create() async {
+        let name = newName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        do {
+            _ = try await InnerTube.shared.createPlaylist(title: name, privacy: privacy)
+            await load()
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 
     private func load() async {
@@ -403,6 +438,20 @@ struct AddToPlaylistSheet: View {
                             guard !name.isEmpty else { return }
                             library.createPlaylist(name, songs: songs)
                             dismiss()
+                        }
+                        .disabled(name.isEmpty)
+                    }
+                    if account.isSignedIn {
+                        Button {
+                            Task {
+                                do {
+                                    _ = try await InnerTube.shared.createPlaylist(title: name, privacy: "PRIVATE",
+                                                                                  videoIds: songs.filter { !$0.isLocal }.map(\.videoId))
+                                    dismiss()
+                                } catch { status = error.localizedDescription }
+                            }
+                        } label: {
+                            Label("Create on YouTube Music instead", systemImage: "icloud.and.arrow.up")
                         }
                         .disabled(name.isEmpty)
                     }
@@ -447,9 +496,69 @@ struct AddToPlaylistSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
             .task {
-                if account.isSignedIn { remote = (try? await YTMusic.libraryItems("FEmusic_liked_playlists")) ?? [] }
+                if account.isSignedIn { remote = (try? await YTMusic.ownPlaylists()) ?? [] }
             }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+/// The account's YouTube Music history, grouped by day; swipe a row to remove it from YouTube.
+struct YouTubeHistoryView: View {
+    @Environment(PlayerController.self) private var player
+    @State private var sections: [HistorySection] = []
+    @State private var loaded = false
+    @State private var error: String?
+
+    var body: some View {
+        List {
+            if !loaded { LoadingView().listRowSeparator(.hidden) }
+            if let error { Text(error).font(.footnote).foregroundStyle(.red) }
+            ForEach(sections) { section in
+                Section(section.title) {
+                    ForEach(Array(section.songs.enumerated()), id: \.offset) { _, song in
+                        SongRow(song: song) {
+                            let all = sections.flatMap(\.songs)
+                            player.play(all, startAt: all.firstIndex(of: song) ?? 0, source: "YouTube History")
+                        }
+                        .swipeActions {
+                            if song.historyRemoveToken != nil {
+                                Button(role: .destructive) { Task { await remove(song) } } label: {
+                                    Label("Remove", systemImage: "trash")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if loaded && sections.isEmpty && error == nil {
+                ContentUnavailableView("No History", systemImage: "clock", description: Text("Songs played on YouTube Music show up here."))
+                    .listRowSeparator(.hidden)
+            }
+        }
+        .listStyle(.plain)
+        .navigationTitle("YouTube History")
+        .task { if !loaded { await load() } }
+        .refreshable { await load() }
+    }
+
+    private func load() async {
+        do {
+            sections = try await YTMusic.history()
+            error = nil
+        } catch {
+            self.error = error.localizedDescription
+        }
+        loaded = true
+    }
+
+    private func remove(_ song: Song) async {
+        do {
+            try await YTMusic.removeFromHistory(song)
+            for i in sections.indices { sections[i].songs.removeAll { $0.id == song.id && $0.historyRemoveToken == song.historyRemoveToken } }
+            sections.removeAll { $0.songs.isEmpty }
+        } catch {
+            self.error = "Couldn't remove it: \(error.localizedDescription)"
+        }
     }
 }

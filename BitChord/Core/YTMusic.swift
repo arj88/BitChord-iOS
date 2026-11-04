@@ -124,7 +124,20 @@ enum YTMusic {
         return items.filter { $0.browseId != "VLLM" && $0.browseId != "VLSE" }
     }
 
-    static func history() async throws -> [Song] {
-        try Parser.songsDeep(await tube.browse("FEmusic_history"))
+    static func history() async throws -> [HistorySection] {
+        try Parser.history(await tube.browse("FEmusic_history"))
+    }
+
+    static func removeFromHistory(_ song: Song) async throws {
+        guard let token = song.historyRemoveToken else { throw InnerTubeError.api("YouTube didn't offer a way to remove this one") }
+        try await tube.sendFeedback(token)
+    }
+
+    /// The account's own playlists (ones it can edit), for "Add to playlist".
+    static func ownPlaylists() async throws -> [ShelfItem] {
+        try await libraryItems("FEmusic_liked_playlists").filter { item in
+            guard let id = item.browseId else { return false }
+            return id.hasPrefix("VLPL") && !id.hasPrefix("VLRD")
+        }
     }
 }

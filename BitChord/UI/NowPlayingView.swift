@@ -9,6 +9,7 @@ struct NowPlayingView: View {
     @Environment(LibraryStore.self) private var library
     @Environment(AppSettings.self) private var settings
     @Environment(AppRouter.self) private var router
+    @Environment(ListenTogether.self) private var party
     @Environment(\.dismiss) private var dismiss
 
     @State private var mode: Mode = .artwork
@@ -72,11 +73,16 @@ struct NowPlayingView: View {
                 Image(systemName: "chevron.down").font(.title3.weight(.semibold)).frame(width: 40, height: 40)
             }
             Spacer()
-            VStack(spacing: 1) {
-                Text(player.sourceTitle == nil ? "NOW PLAYING" : "PLAYING FROM")
-                    .font(.caption2.weight(.semibold)).opacity(0.7)
-                Text(player.sourceTitle ?? (player.current?.albumName ?? ""))
-                    .font(.footnote.weight(.semibold)).lineLimit(1)
+            if party.isActive {
+                Button { router.showParty = true } label: { PartyBadge() }
+                    .buttonStyle(.plain)
+            } else {
+                VStack(spacing: 1) {
+                    Text(player.sourceTitle == nil ? "NOW PLAYING" : "PLAYING FROM")
+                        .font(.caption2.weight(.semibold)).opacity(0.7)
+                    Text(player.sourceTitle ?? (player.current?.albumName ?? ""))
+                        .font(.footnote.weight(.semibold)).lineLimit(1)
+                }
             }
             Spacer()
             Menu { menuItems } label: {
@@ -101,6 +107,9 @@ struct NowPlayingView: View {
                 }
             }
         } label: { Label("Playback Speed (\(Double(player.playbackRate), specifier: "%g")×)", systemImage: "gauge.with.dots.needle.67percent") }
+        Button { router.showParty = true } label: {
+            Label(party.isActive ? "Listen Together (\(party.members.count))" : "Listen Together", systemImage: "person.2.wave.2")
+        }
         Button { showSleep = true } label: {
             Label(player.sleepTimerEnd != nil || player.stopAfterCurrent ? "Sleep Timer (On)" : "Sleep Timer", systemImage: "moon.zzz")
         }

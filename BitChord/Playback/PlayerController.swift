@@ -71,6 +71,16 @@ final class PlayerController {
 
     private var settings: AppSettings { AppSettings.shared }
 
+    /// Set while this phone is in a Listen Together party.
+    @ObservationIgnored weak var party: ListenTogether?
+    /// True while the party is moving the player, so those moves aren't sent back out.
+    @ObservationIgnored private var applyingRemote = false
+    /// The party to send a user action to instead of doing it locally, if there is one.
+    private var partyControls: ListenTogether? {
+        guard !applyingRemote, let party, party.isActive else { return nil }
+        return party
+    }
+
     private init() {
         for (i, p) in players.enumerated() {
             p.automaticallyWaitsToMinimizeStalling = true
@@ -93,6 +103,13 @@ final class PlayerController {
 
     func play(_ songs: [Song], startAt: Int = 0, source: String? = nil, shuffled: Bool = false) {
         guard !songs.isEmpty else { return }
+        if let party = partyControls {
+            var list = songs
+            var start = min(max(0, startAt), songs.count - 1)
+            if shuffled { list.shuffle(); start = 0 }
+            party.publishPlay(list, index: start)
+            return
+        }
         radioToken = nil
         radioPlaylistId = nil
         sourceTitle = source
@@ -116,6 +133,15 @@ final class PlayerController {
 
     /// Plays a song and fills the queue with its YouTube Music radio.
     func playRadio(_ song: Song) {
+        if let party = partyControls {
+            party.publishPlay([song], index: 0)
+            Task {
+                if let radio = try? await YTMusic.radio(videoId: song.videoId) {
+                    party.publishAdd(radio.songs.filter { $0.videoId != song.videoId }, playNext: false)
+                }
+            }
+            return
+        }
         play([song], source: "\(song.title) Radio")
         Task { await fetchRadio(seed: song, replaceAfterCurrent: true) }
     }
@@ -136,6 +162,7 @@ final class PlayerController {
     }
 
     func playNext(_ songs: [Song]) {
+        if let party = partyControls, current != nil { party.publishAdd(songs, playNext: true); return }
         guard current != nil else { play(songs); return }
         let ids = Set(songs.map(\.videoId))
         let currentId = current?.videoId
@@ -147,6 +174,7 @@ final class PlayerController {
     }
 
     func addToQueue(_ songs: [Song]) {
+        if let party = partyControls, current != nil { party.publishAdd(songs, playNext: false); return }
         guard current != nil else { play(songs); return }
         let known = Set(queue.map(\.videoId))
         queue += songs.filter { !known.contains($0.videoId) }
@@ -156,6 +184,10 @@ final class PlayerController {
 
     func togglePlay() {
         if current == nil { return }
+        if let party = partyControls {
+            party.publishPlayPause(playing: !isPlaying || party.detached, position: livePosition())
+            return
+        }
         if players[active].currentItem == nil {
             loadCurrent(autoplay: true, resumeAt: position)
             return
@@ -164,6 +196,11 @@ final class PlayerController {
     }
 
     func resume() {
+        if let party = partyControls { party.publishPlayPause(playing: true, position: livePosition()); return }
+        resumeLocal()
+    }
+
+    private func resumeLocal() {
         try? AVAudioSession.sharedInstance().setActive(true)
         players[active].playImmediately(atRate: playbackRate)
         isPlaying = true
@@ -172,6 +209,11 @@ final class PlayerController {
     }
 
     func pause() {
+        if let party = partyControls { party.publishPlayPause(playing: false, position: livePosition()); return }
+        pauseLocal()
+    }
+
+    private func pauseLocal() {
         cancelFade()
         resetAutomix()
         players[active].pause()
@@ -183,6 +225,7 @@ final class PlayerController {
     }
 
     func next() {
+        if let party = partyControls { party.publishNext(); return }
         guard !queue.isEmpty else { return }
         if index + 1 < queue.count {
             advance(to: index + 1)
@@ -197,6 +240,10 @@ final class PlayerController {
     }
 
     func previous() {
+        if let party = partyControls {
+            if position > 4 { party.publishSeek(0) } else { party.publishPrevious() }
+            return
+        }
         if position > 4 || index == 0 {
             seek(to: 0)
         } else {
@@ -206,10 +253,16 @@ final class PlayerController {
 
     func jump(to i: Int) {
         guard queue.indices.contains(i) else { return }
+        if let party = partyControls { party.publishJump(i); return }
         advance(to: i)
     }
 
     func seek(to seconds: Double) {
+        if let party = partyControls { party.publishSeek(seconds); return }
+        seekLocal(to: seconds)
+    }
+
+    private func seekLocal(to seconds: Double) {
         cancelFade()
         resetAutomix()
         let t = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
@@ -221,6 +274,14 @@ final class PlayerController {
     }
 
     func toggleShuffle() {
+        if let party = partyControls, let cur = current {
+            // In a party, shuffle reorders what's coming up for everyone.
+            var rest = Array(queue[(index + 1)...])
+            rest.shuffle()
+            party.publishQueue(Array(queue[...index]) + rest, index: index)
+            _ = cur
+            return
+        }
         shuffle.toggle()
         guard let cur = current else { return }
         if shuffle {
@@ -251,6 +312,11 @@ final class PlayerController {
     func move(from source: IndexSet, to destination: Int) {
         // Offsets are relative to the Up Next list (after the current track).
         let base = index + 1
+        if let party = partyControls, let from = source.first, queue.indices.contains(base + from) {
+            let to = destination > from ? destination - 1 : destination
+            party.publishMove(from: base + from, to: base + to, videoId: queue[base + from].videoId)
+            return
+        }
         var upcoming = Array(queue[base...])
         upcoming.move(fromOffsets: source, toOffset: destination)
         queue.replaceSubrange(base..., with: upcoming)
@@ -260,6 +326,10 @@ final class PlayerController {
 
     func removeUpcoming(at offsets: IndexSet) {
         let base = index + 1
+        if let party = partyControls {
+            for o in offsets where queue.indices.contains(base + o) { party.publishRemove(queue[base + o].videoId) }
+            return
+        }
         let absolute = offsets.map { $0 + base }.filter { queue.indices.contains($0) }
         for i in absolute.sorted(by: >) { queue.remove(at: i) }
         invalidatePrepared()
@@ -268,6 +338,7 @@ final class PlayerController {
 
     func clearUpNext() {
         guard index + 1 < queue.count else { return }
+        if let party = partyControls { party.publishClearUpcoming(); return }
         queue.removeSubrange((index + 1)...)
         invalidatePrepared()
         saveQueue()
@@ -287,14 +358,15 @@ final class PlayerController {
         sleepTimerEnd = end
         sleepTimer = Timer.scheduledTimer(withTimeInterval: Double(minutes) * 60, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.pause()
+                self?.party?.detach()
+                self?.pauseLocal()
                 self?.sleepTimerEnd = nil
             }
         }
     }
 
     func stop() {
-        pause()
+        pauseLocal()
         players.forEach { $0.replaceCurrentItem(with: nil) }
         queue = []
         index = 0
@@ -376,7 +448,7 @@ final class PlayerController {
                 self.isLoading = false
                 self.errorMessage = "\(song.title): \(error.localizedDescription)"
                 // Skip what can't be played rather than stopping the queue.
-                if autoplay && self.index + 1 < self.queue.count {
+                if autoplay && self.index + 1 < self.queue.count && self.party?.isActive != true {
                     try? await Task.sleep(nanoseconds: 1_200_000_000)
                     if generation == self.loadGeneration { self.advance(to: self.index + 1) }
                 } else {
@@ -487,21 +559,26 @@ final class PlayerController {
             loadCurrent(autoplay: true, resumeAt: position)
         } else {
             errorMessage = "\(song.title) stopped streaming. Skipping."
-            if hasNext { next() } else { pause() }
+            if hasNext { next() } else { pauseLocal() }
         }
     }
 
     private func itemEnded(player: Int) {
         guard player == active, !fading else { return }
         endHandled = true
+        if let party, party.isActive, let song = current {
+            // The party decides what plays next; tell it this song is over.
+            party.trackEnded(song.videoId)
+            return
+        }
         if stopAfterCurrent {
             stopAfterCurrent = false
-            pause()
-            seek(to: 0)
+            pauseLocal()
+            seekLocal(to: 0)
             return
         }
         if repeatMode == .one {
-            seek(to: 0)
+            seekLocal(to: 0)
             players[active].playImmediately(atRate: playbackRate)
             scrobbled = false
             startedAt = Date()
@@ -511,7 +588,7 @@ final class PlayerController {
             next()
         } else {
             isPlaying = false
-            seek(to: 0)
+            seekLocal(to: 0)
             players[active].pause()
             updateNowPlaying()
         }
@@ -625,7 +702,7 @@ final class PlayerController {
 
     /// Automix runs only when nothing else is bending time: normal speed, no repeat-one, no stop-after.
     private var automixOn: Bool {
-        settings.automix && playbackRate == 1 && repeatMode != .one && !stopAfterCurrent
+        settings.automix && playbackRate == 1 && repeatMode != .one && !stopAfterCurrent && party?.isActive != true
     }
 
     private func automixTick(remaining: Double) {
@@ -849,11 +926,11 @@ final class PlayerController {
             automixTick(remaining: remaining)
         } else {
             let fade = settings.crossfade
-            if fade > 0, !fading, remaining <= fade, remaining > 0.3, !stopAfterCurrent, repeatMode != .one {
+            if fade > 0, !fading, remaining <= fade, remaining > 0.3, !stopAfterCurrent, repeatMode != .one, party?.isActive != true {
                 startCrossfade(over: min(fade, remaining))
             }
         }
-        if index >= queue.count - 2, settings.autoplay, !fetchingRadio, let seed = current, repeatMode == .off,
+        if index >= queue.count - 2, settings.autoplay, !fetchingRadio, let seed = current, repeatMode == .off, party?.isActive != true,
            Date().timeIntervalSince(lastRadioAttempt) > 30 {
             lastRadioAttempt = Date()
             Task { await fetchRadio(seed: seed, replaceAfterCurrent: false) }
@@ -966,6 +1043,7 @@ final class PlayerController {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 if type == .began {
+                    self.party?.detach()
                     self.isPlaying = false
                     self.updateNowPlaying()
                 } else if options?.contains(.shouldResume) == true {
@@ -976,7 +1054,10 @@ final class PlayerController {
         NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] note in
             guard let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
                   AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
-            MainActor.assumeIsolated { self?.pause() }
+            MainActor.assumeIsolated {
+                self?.party?.detach()
+                self?.pauseLocal()
+            }
         }
     }
 
@@ -1085,6 +1166,66 @@ final class PlayerController {
     }
 
     func persistNow() { saveQueue() }
+
+    // MARK: Listen Together (inbound)
+
+    /// Moves the local player to where the party is. Called on every party frame and once a
+    /// second; it only acts when something actually differs, so calling it often is cheap.
+    func applyParty(queue newQueue: [Song], index newIndex: Int, track: Song?, target: Double, playing: Bool, startInMs: Double) {
+        applyingRemote = true
+        defer { applyingRemote = false }
+        guard let track else {
+            if isPlaying { pauseLocal() }
+            return
+        }
+        var list = newQueue
+        var i = newIndex
+        if !list.indices.contains(i) || list[i].videoId != track.videoId {
+            if let found = list.firstIndex(where: { $0.videoId == track.videoId }) { i = found } else { list.insert(track, at: 0); i = 0 }
+        }
+        let trackChanged = current?.videoId != track.videoId
+        if list.map(\.videoId) != queue.map(\.videoId) || index != i {
+            let nextBefore = nextIndex.map { queue[$0].videoId }
+            queue = list
+            index = i
+            if nextIndex.map({ queue[$0].videoId }) != nextBefore { invalidatePrepared() }
+            saveQueue()
+        }
+        // Already loading this track: let it finish rather than restarting the load.
+        if !trackChanged && isLoading { return }
+        if trackChanged || players[active].currentItem == nil {
+            loadCurrent(autoplay: playing && startInMs < 80, resumeAt: max(0, target))
+            if playing && startInMs >= 80 { scheduleRemoteResume(after: startInMs) }
+            return
+        }
+        guard !isLoading else { return }
+        let drift = livePosition() - target
+        if playing {
+            if startInMs >= 80 {
+                // A resume scheduled a moment ahead: wait for it, then start with everyone.
+                if !isPlaying { scheduleRemoteResume(after: startInMs) }
+            } else if !isPlaying {
+                if abs(drift) > 0.15 { seekLocal(to: target) }
+                resumeLocal()
+            } else if abs(drift) > 0.75 {
+                seekLocal(to: target)
+            }
+        } else {
+            if isPlaying { pauseLocal() }
+            if abs(drift) > 0.5 { seekLocal(to: target) }
+        }
+    }
+
+    @ObservationIgnored private var remoteResumeWork: DispatchWorkItem?
+
+    private func scheduleRemoteResume(after ms: Double) {
+        remoteResumeWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated { self?.party?.reconcile() }
+        }
+        remoteResumeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + ms / 1000, execute: work)
+    }
 
     /// The exact playhead, read straight from AVPlayer (for lyrics animation).
     func livePosition() -> Double {

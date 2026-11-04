@@ -10,6 +10,7 @@ enum Route: Hashable {
     case history
     case localFiles
     case accountLibrary(title: String, browseId: String)
+    case youtubeHistory
     case settings
 
     static func `for`(_ item: ShelfItem) -> Route? {
@@ -36,6 +37,7 @@ struct RouteDestination: View {
         case .history: SongCollectionView(kind: .history)
         case .localFiles: SongCollectionView(kind: .local)
         case .accountLibrary(let title, let id): AccountLibraryView(title: title, browseId: id)
+        case .youtubeHistory: YouTubeHistoryView()
         case .settings: SettingsView()
         }
     }
@@ -384,25 +386,42 @@ struct ErrorView: View {
 /// One tap to save a whole list offline, with live progress.
 struct DownloadAllButton: View {
     let songs: [Song]
+    /// For lists that load in pages (long playlists): fetches every remaining song first.
+    var loadAll: (() async -> [Song])?
     @Environment(LibraryStore.self) private var library
+    @State private var fetching = false
+    @State private var requested: [Song]?
 
     var body: some View {
-        let downloadable = songs.filter { !$0.isLocal }
-        let done = library.downloadedCount(downloadable)
-        let active = library.activeDownloads(downloadable)
+        let list = (requested ?? songs).filter { !$0.isLocal }
+        let done = library.downloadedCount(list)
+        let active = library.activeDownloads(list)
+        let allDone = !list.isEmpty && done == list.count && !fetching
         Button {
-            library.download(downloadable)
+            Task {
+                var all = songs
+                if let loadAll {
+                    fetching = true
+                    all = await loadAll()
+                    fetching = false
+                }
+                requested = all
+                library.download(all.filter { !$0.isLocal })
+            }
         } label: {
             HStack(spacing: 8) {
-                if active > 0 {
+                if fetching {
                     ProgressView().controlSize(.small)
-                    Text("Downloading… \(done) of \(downloadable.count)")
-                } else if done == downloadable.count && done > 0 {
+                    Text("Getting the whole playlist…")
+                } else if active > 0 {
+                    ProgressView().controlSize(.small)
+                    Text("Downloading… \(done) of \(list.count)")
+                } else if allDone {
                     Image(systemName: "checkmark.circle.fill")
-                    Text("All \(done) Downloaded")
+                    Text("Downloaded")
                 } else {
                     Image(systemName: "arrow.down.circle")
-                    Text(done > 0 ? "Download Remaining \(downloadable.count - done)" : "Download All \(downloadable.count)")
+                    Text("Download")
                 }
             }
             .font(.subheadline.weight(.semibold))
@@ -411,7 +430,7 @@ struct DownloadAllButton: View {
         .buttonStyle(.bordered)
         .controlSize(.large)
         .tint(Theme.accent)
-        .disabled(downloadable.isEmpty || active > 0 || done == downloadable.count)
+        .disabled(songs.isEmpty || fetching || active > 0 || allDone)
     }
 }
 
