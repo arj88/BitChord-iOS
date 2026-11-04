@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-15
@@ -39,14 +42,47 @@ jobs:
         if: failure()
         run: grep -E "error:" xcodebuild.log | sort -u | head -100
 
+      - name: Check the app bundle
+        run: |
+          APP=build/Build/Products/Release-iphoneos/BitChord.app
+          echo "App contents:"; ls -la "$APP"
+          echo "Frameworks:"; ls -la "$APP/Frameworks" || true
+          # Google Cast is a dynamic framework: if it isn't inside the app, the app can't launch.
+          if [ ! -d "$APP/Frameworks/GoogleCast.framework" ]; then
+            echo "GoogleCast.framework was not embedded; copying it in from the package build."
+            FW=$(find build -path "*Release-iphoneos*" -name GoogleCast.framework -type d | grep -v "BitChord.app" | head -1)
+            [ -z "$FW" ] && FW=$(find build/SourcePackages -path "*ios-arm64/GoogleCast.framework" -type d | head -1)
+            echo "Found: $FW"
+            mkdir -p "$APP/Frameworks"
+            cp -R "$FW" "$APP/Frameworks/"
+            rm -rf "$APP/Frameworks/GoogleCast.framework/Headers" "$APP/Frameworks/GoogleCast.framework/Modules"
+          fi
+          test -f "$APP/Frameworks/GoogleCast.framework/GoogleCast"
+          otool -L "$APP/BitChord" | grep -i googlecast || true
+          du -sh "$APP"
+
       - name: Package .ipa
         run: |
           mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/BitChord.app Payload/
-          zip -qry BitChord.ipa Payload
+          zip -qr BitChord.ipa Payload
+          unzip -l BitChord.ipa | tail -3
 
       - uses: actions/upload-artifact@v4
         with:
           name: BitChord-ipa
           path: BitChord.ipa
           retention-days: 30
+
+      # Also publish the bare .ipa on the repo's Releases page, so it downloads
+      # ready to drop into Sideloadly with no zip around it.
+      - name: Publish to Releases
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build-${{ github.run_number }}"
+          gh release create "$TAG" BitChord.ipa \
+            --title "BitChord iOS build ${{ github.run_number }}" \
+            --notes "Unsigned build of ${{ github.sha }}. Install with Sideloadly or AltStore." \
+            --latest

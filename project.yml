@@ -19,6 +19,9 @@ targets:
     platform: iOS
     dependencies:
       - package: GoogleCast
+        product: GoogleCast
+        embed: true
+        codeSign: true
     sources:
       - path: BitChord
     info:
