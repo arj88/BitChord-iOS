@@ -36,7 +36,11 @@ jobs:
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build | tee xcodebuild.log | grep -E "error:|warning: .*BitChord|\*\* BUILD" || true
-          test -d build/Build/Products/Release-iphoneos/BitChord.app
+          # The app's own binary and Info.plist must exist: a bundle holding only an
+          # embedded framework means the Swift code failed to compile.
+          grep -q "BUILD SUCCEEDED" xcodebuild.log
+          test -f build/Build/Products/Release-iphoneos/BitChord.app/BitChord
+          test -f build/Build/Products/Release-iphoneos/BitChord.app/Info.plist
 
       - name: Show compiler errors
         if: failure()
@@ -58,6 +62,7 @@ jobs:
             rm -rf "$APP/Frameworks/GoogleCast.framework/Headers" "$APP/Frameworks/GoogleCast.framework/Modules"
           fi
           test -f "$APP/Frameworks/GoogleCast.framework/GoogleCast"
+          test -f "$APP/BitChord" && test -f "$APP/Info.plist"
           otool -L "$APP/BitChord" | grep -i googlecast || true
           du -sh "$APP"
 

@@ -239,7 +239,8 @@ final class BassSwapFilter {
         }
         // Depending on the SDK, the tap comes back either managed or as Unmanaged.
         if let unmanaged = created as? Unmanaged<MTAudioProcessingTap> { return unmanaged.takeRetainedValue() }
-        return (created as AnyObject) as? MTAudioProcessingTap
+        // A CF type can't be conditionally cast to, but here it already is one.
+        return unsafeBitCast(created as AnyObject, to: MTAudioProcessingTap.self)
     }
 
     private static func create<T>(_ body: (UnsafeMutablePointer<T?>) -> OSStatus) -> T? {
