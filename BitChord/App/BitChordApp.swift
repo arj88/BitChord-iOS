@@ -63,6 +63,12 @@ struct BitChordApp: App {
     @State private var router = AppRouter()
     @State private var account = AccountManager.shared
     @State private var party = ListenTogether.shared
+    @State private var cast: CastManager
+
+    init() {
+        CastManager.configure()
+        _cast = State(initialValue: CastManager.shared)
+    }
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
@@ -74,6 +80,7 @@ struct BitChordApp: App {
                 .environment(router)
                 .environment(account)
                 .environment(party)
+                .environment(cast)
                 .preferredColorScheme(settings.appearance.colorScheme)
                 .tint(Theme.accent)
                 .onOpenURL { router.handle(url: $0, player: player) }

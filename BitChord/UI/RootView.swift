@@ -52,6 +52,7 @@ struct RootView: View {
 struct MiniPlayer: View {
     @Environment(PlayerController.self) private var player
     @Environment(ListenTogether.self) private var party
+    @Environment(CastManager.self) private var cast
     @Environment(AppRouter.self) private var router
 
     var body: some View {
@@ -63,6 +64,7 @@ struct MiniPlayer: View {
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 4) {
                         if party.isActive { Image(systemName: "person.2.fill").font(.caption2).foregroundStyle(Theme.accent) }
+                        if cast.isConnected { Image(systemName: "tv").font(.caption2).foregroundStyle(Theme.accent) }
                         Text(song.title).font(.subheadline.weight(.semibold)).lineLimit(1)
                     }
                     Text(song.artist).font(.footnote).foregroundStyle(.secondary).lineLimit(1)

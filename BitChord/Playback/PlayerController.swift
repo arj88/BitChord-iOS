@@ -75,6 +75,12 @@ final class PlayerController {
     @ObservationIgnored weak var party: ListenTogether?
     /// True while the party is moving the player, so those moves aren't sent back out.
     @ObservationIgnored private var applyingRemote = false
+    /// The TV to send playback to while casting (not during a party, which keeps playback local).
+    private var castControls: CastManager? {
+        guard !applyingRemote, party?.isActive != true, CastManager.shared.isConnected else { return nil }
+        return CastManager.shared
+    }
+
     /// The party to send a user action to instead of doing it locally, if there is one.
     private var partyControls: ListenTogether? {
         guard !applyingRemote, let party, party.isActive else { return nil }
@@ -188,6 +194,10 @@ final class PlayerController {
             party.publishPlayPause(playing: !isPlaying || party.detached, position: livePosition())
             return
         }
+        if let cast = castControls {
+            if cast.client?.mediaStatus?.mediaInformation == nil { loadCurrent(autoplay: true, resumeAt: position) } else { cast.playPause(!isPlaying) }
+            return
+        }
         if players[active].currentItem == nil {
             loadCurrent(autoplay: true, resumeAt: position)
             return
@@ -197,6 +207,7 @@ final class PlayerController {
 
     func resume() {
         if let party = partyControls { party.publishPlayPause(playing: true, position: livePosition()); return }
+        if let cast = castControls { cast.playPause(true); return }
         resumeLocal()
     }
 
@@ -210,6 +221,7 @@ final class PlayerController {
 
     func pause() {
         if let party = partyControls { party.publishPlayPause(playing: false, position: livePosition()); return }
+        if let cast = castControls { cast.playPause(false); return }
         pauseLocal()
     }
 
@@ -259,6 +271,7 @@ final class PlayerController {
 
     func seek(to seconds: Double) {
         if let party = partyControls { party.publishSeek(seconds); return }
+        if let cast = castControls { cast.seek(to: seconds); position = seconds; return }
         seekLocal(to: seconds)
     }
 
@@ -385,6 +398,14 @@ final class PlayerController {
 
     private func advance(to newIndex: Int) {
         guard queue.indices.contains(newIndex) else { return }
+        if let cast = castControls {
+            index = newIndex
+            position = 0
+            duration = queue[newIndex].durationSeconds ?? 0
+            cast.play(from: newIndex)
+            songDidStart(beforeLoad: true)
+            return
+        }
         cancelFade()
         resetAutomix()
         if let prepared = preparedIndex, prepared == newIndex, preparedSongId == queue[newIndex].videoId,
@@ -409,6 +430,15 @@ final class PlayerController {
 
     private func loadCurrent(autoplay: Bool, resumeAt: Double = 0) {
         guard let song = current else { return }
+        if let cast = castControls {
+            players[active].pause()
+            position = resumeAt
+            duration = song.durationSeconds ?? 0
+            isLoading = true
+            cast.load(queue: queue, index: index, position: resumeAt, autoplay: autoplay)
+            songDidStart(beforeLoad: true)
+            return
+        }
         loadGeneration += 1
         let generation = loadGeneration
         errorMessage = nil
@@ -604,6 +634,7 @@ final class PlayerController {
     }
 
     private func invalidatePrepared() {
+        if castControls != nil { CastManager.shared.upcomingChanged() }
         resetAutomix()
         preparedIndex = nil
         preparedSongId = nil
@@ -902,6 +933,8 @@ final class PlayerController {
     @ObservationIgnored private var endHandled = false
 
     private func tick(player: Int) {
+        // While casting, the TV's status (applyCastStatus) drives position and state.
+        if castControls != nil { return }
         guard player == active, let item = players[active].currentItem else { return }
         let itemDuration = CMTimeGetSeconds(item.duration)
         if let known = knownDurations[active], known > 0 {
@@ -1167,6 +1200,52 @@ final class PlayerController {
 
     func persistNow() { saveQueue() }
 
+    // MARK: Google Cast
+
+    /// A cast session started: stop here and carry on from the same spot on the TV.
+    func castStarted() {
+        guard party?.isActive != true, current != nil else { return }
+        let resumeAt = livePosition()
+        let wasPlaying = isPlaying
+        pauseLocal()
+        isPlaying = wasPlaying
+        loadCurrent(autoplay: wasPlaying, resumeAt: resumeAt)
+    }
+
+    /// The cast session ended: pick up on the phone where the TV left off (paused, as phones do).
+    func castEnded(position resumeAt: Double, playing: Bool) {
+        guard current != nil else { return }
+        isPlaying = false
+        loadCurrent(autoplay: false, resumeAt: resumeAt)
+    }
+
+    /// Mirrors the TV's state into the player the screens read.
+    func applyCastStatus(videoId: String?, position tvPosition: Double, duration tvDuration: Double,
+                         playing: Bool, loading: Bool, finished: Bool) {
+        guard party?.isActive != true else { return }
+        if let videoId, current?.videoId != videoId {
+            // The TV moved on by itself: follow it.
+            let start = max(0, index - 1)
+            if let found = queue[start...].firstIndex(where: { $0.videoId == videoId }) ?? queue.firstIndex(where: { $0.videoId == videoId }) {
+                index = found
+                songDidStart()
+            }
+        }
+        if tvPosition.isFinite { position = tvPosition }
+        if tvDuration > 0 { duration = tvDuration }
+        isPlaying = playing
+        isLoading = loading
+        if finished, index + 1 < queue.count, !isLoading {
+            advance(to: index + 1)
+        } else if finished, index + 1 >= queue.count, settings.autoplay, let seed = current, !fetchingRadio {
+            Task {
+                await fetchRadio(seed: seed, replaceAfterCurrent: false)
+                if index + 1 < queue.count { advance(to: index + 1) }
+            }
+        }
+        updateNowPlaying()
+    }
+
     // MARK: Listen Together (inbound)
 
     /// Moves the local player to where the party is. Called on every party frame and once a
@@ -1229,6 +1308,7 @@ final class PlayerController {
 
     /// The exact playhead, read straight from AVPlayer (for lyrics animation).
     func livePosition() -> Double {
+        if CastManager.shared.isConnected, party?.isActive != true, let p = CastManager.shared.approximatePosition { return p }
         guard players[active].currentItem != nil else { return position }
         let t = CMTimeGetSeconds(players[active].currentTime())
         return t.isFinite ? t : position

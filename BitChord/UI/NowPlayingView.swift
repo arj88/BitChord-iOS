@@ -1,4 +1,5 @@
 import AVKit
+import GoogleCast
 import MediaPlayer
 import SwiftUI
 
@@ -10,6 +11,7 @@ struct NowPlayingView: View {
     @Environment(AppSettings.self) private var settings
     @Environment(AppRouter.self) private var router
     @Environment(ListenTogether.self) private var party
+    @Environment(CastManager.self) private var cast
     @Environment(\.dismiss) private var dismiss
 
     @State private var mode: Mode = .artwork
@@ -232,16 +234,35 @@ struct NowPlayingView: View {
             }
             .buttonStyle(.plain)
 
-            VolumeSlider().frame(height: 34)
+            if cast.isConnected {
+                VStack(spacing: 6) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "speaker.fill").font(.caption).opacity(0.7)
+                        Slider(value: Binding(get: { Double(cast.volume) }, set: { cast.setVolume(Float($0)) }), in: 0...1)
+                            .tint(.white)
+                        Image(systemName: "speaker.wave.3.fill").font(.caption).opacity(0.7)
+                    }
+                    Label("Playing on \(cast.deviceName ?? "TV")", systemImage: "tv")
+                        .font(.caption.weight(.semibold))
+                        .opacity(0.8)
+                    if let castError = cast.lastError {
+                        Text(castError).font(.caption2).opacity(0.7).multilineTextAlignment(.center)
+                    }
+                }
+            } else {
+                VolumeSlider().frame(height: 34)
+            }
 
             HStack {
                 modeButton(.lyrics, icon: "quote.bubble")
                 Spacer()
                 AirPlayButton().frame(width: 44, height: 44)
                 Spacer()
+                CastButton().frame(width: 44, height: 44)
+                Spacer()
                 modeButton(.queue, icon: "list.bullet")
             }
-            .padding(.horizontal, 30)
+            .padding(.horizontal, 24)
         }
     }
 
@@ -358,6 +379,16 @@ struct VolumeSlider: UIViewRepresentable {
         return view
     }
     func updateUIView(_ uiView: MPVolumeView, context: Context) {}
+}
+
+/// Google's Cast button: lists TVs and Chromecasts on the Wi-Fi, and shows when connected.
+struct CastButton: UIViewRepresentable {
+    func makeUIView(context: Context) -> GCKUICastButton {
+        let button = GCKUICastButton(frame: CGRect(x: 0, y: 0, width: 24, height: 24))
+        button.tintColor = .white
+        return button
+    }
+    func updateUIView(_ uiView: GCKUICastButton, context: Context) {}
 }
 
 struct AirPlayButton: UIViewRepresentable {

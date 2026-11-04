@@ -9,10 +9,16 @@ settings:
     SWIFT_VERSION: "5.0"
     MARKETING_VERSION: "1.0.0"
     CURRENT_PROJECT_VERSION: "1"
+packages:
+  GoogleCast:
+    url: https://github.com/SRGSSR/google-cast-sdk
+    exactVersion: 4.8.6
 targets:
   BitChord:
     type: application
     platform: iOS
+    dependencies:
+      - package: GoogleCast
     sources:
       - path: BitChord
     info:
@@ -35,6 +41,10 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         UIStatusBarStyle: UIStatusBarStyleDefault
+        NSLocalNetworkUsageDescription: BitChord looks for TVs and speakers on your Wi-Fi so you can cast music to them.
+        NSBonjourServices:
+          - _googlecast._tcp
+          - _CC1AD845._googlecast._tcp
         CFBundleURLTypes:
           - CFBundleURLName: com.music.bitchord.links
             CFBundleURLSchemes: [bitchord]
