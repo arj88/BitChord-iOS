@@ -25,6 +25,7 @@ enum ArtworkStore {
     private static let cache: NSCache<NSURL, UIImage> = {
         let c = NSCache<NSURL, UIImage>()
         c.countLimit = 400
+        c.totalCostLimit = 120 * 1024 * 1024   // decoded bitmaps, so cap by memory too
         return c
     }()
 
@@ -51,7 +52,8 @@ enum ArtworkStore {
         }
         guard let data, let image = UIImage(data: data) else { return nil }
         let decoded = await Task.detached(priority: .userInitiated) { image.preparingForDisplay() ?? image }.value
-        cache.setObject(decoded, forKey: url as NSURL)
+        let cost = Int(decoded.size.width * decoded.scale * decoded.size.height * decoded.scale * 4)
+        cache.setObject(decoded, forKey: url as NSURL, cost: cost)
         return decoded
     }
 

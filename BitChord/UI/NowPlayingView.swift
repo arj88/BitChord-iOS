@@ -49,7 +49,7 @@ struct NowPlayingView: View {
             }
             .frame(width: geo.size.width, height: geo.size.height)
             .background {
-                PlayerBackground(colors: colors, artworkURL: player.current?.artworkURL(544), animated: settings.animatedBackground)
+                PlayerBackground(colors: colors, artworkURL: player.current?.artworkURL(544), animated: settings.animatedBackground && player.isPlaying)
             }
             .offset(y: dragOffset)
             .gesture(
@@ -296,8 +296,11 @@ struct PlayerBackground: View {
     let colors: [Color]
     let artworkURL: URL?
     let animated: Bool
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
+        // The moving gradient only runs while music plays and the app is on screen.
+        let moving = animated && scenePhase == .active
         ZStack {
             Color.black
             ArtworkImage(url: artworkURL, cornerRadius: 0)
@@ -305,7 +308,7 @@ struct PlayerBackground: View {
                 .scaleEffect(1.6)
                 .opacity(0.9)
             if #available(iOS 18.0, *) {
-                TimelineView(.animation(minimumInterval: 1 / 20, paused: !animated)) { context in
+                TimelineView(.animation(minimumInterval: 1 / 20, paused: !moving)) { context in
                     let t = context.date.timeIntervalSinceReferenceDate
                     MeshGradient(width: 3, height: 3, points: meshPoints(t), colors: meshColors)
                         .opacity(0.85)

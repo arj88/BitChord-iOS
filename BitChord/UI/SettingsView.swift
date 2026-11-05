@@ -103,6 +103,7 @@ struct SettingsView: View {
                 Picker("Theme", selection: $settings.appearance) {
                     ForEach(AppearanceMode.allCases) { Text($0.rawValue).tag($0) }
                 }
+                AppIconPicker()
                 AccentPicker(selection: $settings.accent, customHex: $settings.customAccentHex)
                 Toggle("Colours from artwork", isOn: $settings.dynamicColors)
                 Toggle("Animated player background", isOn: $settings.animatedBackground)
@@ -259,5 +260,81 @@ struct AccentPicker: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
+    }
+}
+
+
+/// Lets the user swap the home-screen icon for one of FYT's colour variants.
+struct AppIconPicker: View {
+    private struct Option: Identifiable {
+        let id: String          // preview image suffix
+        let iconName: String?   // nil = the default icon
+        let label: String
+    }
+    private let options: [Option] = [
+        Option(id: "Default", iconName: nil, label: "Red"),
+        Option(id: "Dark", iconName: "AppIconDark", label: "Dark"),
+        Option(id: "Purple", iconName: "AppIconPurple", label: "Purple"),
+        Option(id: "Blue", iconName: "AppIconBlue", label: "Blue"),
+        Option(id: "Green", iconName: "AppIconGreen", label: "Green"),
+        Option(id: "Orange", iconName: "AppIconOrange", label: "Orange"),
+        Option(id: "Pink", iconName: "AppIconPink", label: "Pink"),
+    ]
+    @State private var current: String? = UIApplication.shared.alternateIconName
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("App icon")
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 14) {
+                    ForEach(options) { option in
+                        let selected = current == option.iconName
+                        Button { choose(option) } label: {
+                            VStack(spacing: 6) {
+                                Image("IconPreview" + option.id)
+                                    .resizable()
+                                    .frame(width: 58, height: 58)
+                                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 15, style: .continuous)
+                                            .stroke(selected ? Theme.accent : .clear, lineWidth: 2.5)
+                                            .padding(-4)
+                                    )
+                                Text(option.label)
+                                    .font(.caption)
+                                    .foregroundStyle(selected ? .primary : .secondary)
+                            }
+                            .padding(4)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(option.label) icon")
+                        .accessibilityAddTraits(selected ? .isSelected : [])
+                    }
+                }
+            }
+            if let error {
+                Text(error).font(.caption).foregroundStyle(.secondary)
+            } else if current == nil {
+                Text("The red icon turns dark when your Home Screen icons are set to Dark.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func choose(_ option: Option) {
+        guard UIApplication.shared.supportsAlternateIcons, current != option.iconName else { return }
+        UIApplication.shared.setAlternateIconName(option.iconName) { failure in
+            Task { @MainActor in
+                if let failure {
+                    error = "Couldn't change the icon: \(failure.localizedDescription)"
+                } else {
+                    error = nil
+                    current = option.iconName
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                }
+            }
+        }
     }
 }

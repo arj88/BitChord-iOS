@@ -47,6 +47,10 @@ jobs:
         if: failure()
         run: grep -E "error:" xcodebuild.log | sort -u | head -100
 
+      - name: Show app warnings
+        if: always()
+        run: grep -E "/BitChord/[^ ]+\.swift:[0-9]+:[0-9]+: warning:" xcodebuild.log | sed 's|.*/BitChord/|BitChord/|' | sort -u | head -80 || true
+
       - name: Check the app bundle
         run: |
           APP=build/Build/Products/Release-iphoneos/BitChord.app
