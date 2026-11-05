@@ -213,7 +213,7 @@ final class PlayerController {
 
     private func resumeLocal() {
         try? AVAudioSession.sharedInstance().setActive(true)
-        players[active].playImmediately(atRate: playbackRate)
+        players[active].playImmediately(atRate: songRate)
         isPlaying = true
         updateNowPlaying()
         updatePresence()
@@ -228,6 +228,7 @@ final class PlayerController {
     private func pauseLocal() {
         cancelFade()
         resetAutomix()
+        dropStaleMix()
         players[active].pause()
         players[standby].pause()
         isPlaying = false
@@ -278,6 +279,7 @@ final class PlayerController {
     private func seekLocal(to seconds: Double) {
         cancelFade()
         resetAutomix()
+        dropStaleMix()
         let t = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
         players[active].seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
         position = seconds
@@ -359,6 +361,7 @@ final class PlayerController {
 
     func setRate(_ rate: Float) {
         playbackRate = rate
+        carriedRate = nil
         if isPlaying { players[active].rate = rate }
         updateNowPlaying()
     }
@@ -419,6 +422,7 @@ final class PlayerController {
             preparedSongId = nil
             players[active].volume = gain[active]
             players[active].seek(to: .zero)
+            carriedRate = nil
             players[active].playImmediately(atRate: playbackRate)
             isPlaying = true
             songDidStart()
@@ -467,6 +471,7 @@ final class PlayerController {
                 if resumeAt > 0 { _ = await player.seek(to: CMTime(seconds: resumeAt, preferredTimescale: 600)) }
                 if autoplay {
                     try? AVAudioSession.sharedInstance().setActive(true)
+                    self.carriedRate = nil
                     player.playImmediately(atRate: self.playbackRate)
                     self.isPlaying = true
                 }
@@ -609,6 +614,7 @@ final class PlayerController {
         }
         if repeatMode == .one {
             seekLocal(to: 0)
+            carriedRate = nil
             players[active].playImmediately(atRate: playbackRate)
             scrobbled = false
             startedAt = Date()
@@ -679,6 +685,7 @@ final class PlayerController {
         fadeGains = (gain[active], gain[standby])
         to.volume = 0
         to.seek(to: .zero)
+        carriedRate = nil
         to.playImmediately(atRate: playbackRate)
         fadeSteps = max(1, Int(seconds * 20))
         fadeStep = 0
@@ -727,9 +734,13 @@ final class PlayerController {
     @ObservationIgnored private var automixScheduled = false
     @ObservationIgnored private var automixActive = false
     @ObservationIgnored private var automixOutgoing: AVPlayer?
-    @ObservationIgnored private var rateGlideTimer: Timer?
-    @ObservationIgnored private var rateGlideStep = 0
-    @ObservationIgnored private var rateGlideFrom: Float = 1
+    /// After a beat-matched mix the new song keeps the tempo it came in at, because
+    /// changing AVPlayer's rate mid-song makes the time-stretcher drop out for a moment.
+    @ObservationIgnored private var carriedRate: Float?
+    /// The incoming song still carries the mix's volume curve and filter; dropped at the
+    /// next pause or seek, since swapping it while audible would glitch too.
+    @ObservationIgnored private var staleMixOnActive = false
+    private var songRate: Float { carriedRate ?? playbackRate }
 
     /// Automix runs only when nothing else is bending time: normal speed, no repeat-one, no stop-after.
     private var automixOn: Bool {
@@ -765,6 +776,7 @@ final class PlayerController {
         let outDuration = duration
         let inDuration = knownDurations[standby] ?? incoming.durationSeconds ?? 240
         let beats = settings.automixBeats
+        let outRate = Double(songRate)
         automixStatus = "Automix: analysing…"
         Task {
             guard let outURL = await self.fileURL(for: outgoing) else {
@@ -779,7 +791,8 @@ final class PlayerController {
                   self.nextIndex.map({ self.queue[$0].videoId }) == incoming.videoId else { return }
             guard let out, let inc,
                   let plan = AutomixPlanner.plan(outgoing: out, outDuration: outDuration, incoming: inc,
-                                                 beats: beats, notBefore: self.livePosition() + 4) else {
+                                                 beats: beats, notBefore: self.livePosition() + 4,
+                                                 outgoingRate: outRate) else {
                 self.automixStatus = "Automix: no clean transition found, using a normal ending"
                 return
             }
@@ -788,17 +801,19 @@ final class PlayerController {
             guard let inItem = inPlayer.currentItem else { return }
 
             // Outgoing: equal-power fade from the mix point; bass leaves at the swap.
-            let swapOut = plan.outStart + plan.fadeSeconds * plan.swapAt
+            // Item-time lengths on the outgoing song (it may itself be running at outRate).
+            let outFade = plan.fadeSeconds * outRate
+            let swapOut = plan.outStart + outFade * plan.swapAt
             let beatOut = 60 / out.bpm
             let outFilter = BassSwapFilter(points: [(swapOut - beatOut / 2, 20), (swapOut + beatOut / 2, 220)])
             // Incoming (its own time runs at `rate`): fade in; bass arrives at the swap.
             let inFade = plan.fadeSeconds * plan.rate
             let swapIn = plan.inStart + inFade * plan.swapAt
-            let beatIn = beatOut * plan.rate
+            let beatIn = beatOut / outRate * plan.rate
             let inFilter = BassSwapFilter(points: [(swapIn - beatIn / 2, 220), (swapIn + beatIn / 2, 20)])
 
             let outMix = await AutomixAudio.audioMix(for: outItem ?? inItem,
-                volume: [(0.0, Float(1))] + AutomixAudio.equalPower(from: plan.outStart, to: plan.outStart + plan.fadeSeconds, fadingIn: false),
+                volume: [(0.0, Float(1))] + AutomixAudio.equalPower(from: plan.outStart, to: plan.outStart + outFade, fadingIn: false),
                 filter: plan.beatMatched ? outFilter : nil)
             let inMix = await AutomixAudio.audioMix(for: inItem,
                 volume: AutomixAudio.equalPower(from: plan.inStart, to: plan.inStart + inFade, fadingIn: true),
@@ -838,7 +853,7 @@ final class PlayerController {
         inPlayer.volume = gain[standby]
         inPlayer.setRate(Float(plan.rate), time: CMTime(seconds: plan.inStart, preferredTimescale: 48000), atHostTime: hostTime)
         automixScheduled = true
-        let lead = max(0, plan.outStart - livePosition())
+        let lead = max(0, plan.outStart - livePosition()) / Double(max(songRate, 0.1))
         DispatchQueue.main.asyncAfter(deadline: .now() + lead) { [weak self] in
             MainActor.assumeIsolated { self?.automixStarted(plan) }
         }
@@ -855,6 +870,9 @@ final class PlayerController {
         preparedSongId = nil
         isPlaying = true
         songDidStart()
+        // The new song is already running at the matched tempo; it stays there.
+        carriedRate = abs(plan.rate - 1) > 0.001 ? Float(plan.rate) : nil
+        updateNowPlaying()
         DispatchQueue.main.asyncAfter(deadline: .now() + plan.fadeSeconds + 0.2) { [weak self] in
             MainActor.assumeIsolated { self?.automixFinished(plan) }
         }
@@ -866,23 +884,6 @@ final class PlayerController {
         automixOutgoing?.currentItem?.audioMix = nil
         automixOutgoing?.replaceCurrentItem(with: nil)
         finishAutomixCleanup()
-        // Ease back to normal speed over a few seconds rather than jumping.
-        if abs(plan.rate - 1) > 0.001, isPlaying {
-            rateGlideFrom = Float(plan.rate)
-            rateGlideStep = 0
-            rateGlideTimer?.invalidate()
-            rateGlideTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.rateGlideTick() }
-            }
-        }
-    }
-
-    private func rateGlideTick() {
-        rateGlideStep += 1
-        let t = min(1, Float(rateGlideStep) / 16)
-        let rate = rateGlideFrom + (playbackRate - rateGlideFrom) * t
-        if isPlaying { players[active].rate = rate }
-        if t >= 1 { rateGlideTimer?.invalidate(); rateGlideTimer = nil }
     }
 
     /// Clears the bookkeeping once a mix is over (or abandoned mid-way).
@@ -892,16 +893,21 @@ final class PlayerController {
         automixScheduled = false
         automixPlan = nil
         automixOutgoing = nil
-        players[active].automaticallyWaitsToMinimizeStalling = true
+        // Touching the playing item's mix, stall policy or rate here would make it skip;
+        // leave them and tidy up at the next pause or seek.
+        staleMixOnActive = true
+    }
+
+    private func dropStaleMix() {
+        guard staleMixOnActive else { return }
+        staleMixOnActive = false
         players[active].currentItem?.audioMix = nil
+        players[active].automaticallyWaitsToMinimizeStalling = true
         players[active].volume = gain[active]
-        if isPlaying && rateGlideTimer == nil { players[active].rate = playbackRate }
     }
 
     /// Drops a planned (not yet started) mix and undoes its fades, so the song plays on untouched.
     private func resetAutomix() {
-        rateGlideTimer?.invalidate()
-        rateGlideTimer = nil
         if automixActive { return }
         if automixScheduled {
             players[standby].pause()

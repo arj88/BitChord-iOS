@@ -294,13 +294,16 @@ enum AutomixPlanner {
     ///   - incoming: beats near the start of the next song.
     ///   - beats: overlap length in beats of the outgoing song (8, 16 or 32).
     ///   - notBefore: the earliest track time the mix may start (now + a scheduling margin).
-    static func plan(outgoing: BeatGrid, outDuration: Double, incoming: BeatGrid, beats: Int, notBefore: Double) -> TransitionPlan? {
+    ///   - outgoingRate: the speed the playing song actually runs at (it may have kept the
+    ///     tempo of the previous mix). The incoming rate is absolute, and stays within ±8%.
+    static func plan(outgoing: BeatGrid, outDuration: Double, incoming: BeatGrid, beats: Int, notBefore: Double,
+                     outgoingRate: Double = 1) -> TransitionPlan? {
         let solid = outgoing.confidence > 1.25 && incoming.confidence > 1.25
         // Tempo ratio, allowing for one song being counted at half or double time.
         var rate = 1.0
         var ratioOK = false
         if solid {
-            let candidates = [0.5, 1, 2].map { outgoing.bpm / (incoming.bpm * $0) }
+            let candidates = [0.5, 1, 2].map { outgoing.bpm * outgoingRate / (incoming.bpm * $0) }
             if let r = candidates.min(by: { abs($0 - 1) < abs($1 - 1) }), abs(r - 1) <= 0.08 {
                 rate = r
                 ratioOK = true
@@ -308,12 +311,14 @@ enum AutomixPlanner {
         }
         let beatMatched = solid && ratioOK
         let overlapBeats = beatMatched ? beats : min(beats, 8)
-        let fade = Double(overlapBeats) * outgoing.beatLength
+        // Overlap in the outgoing song's own time, and in real seconds.
+        let fadeTrack = Double(overlapBeats) * outgoing.beatLength
+        let fade = fadeTrack / outgoingRate
         let end = min(outgoing.musicEnd, outDuration) + outgoing.beatLength * 0.5
 
         // The latest bar that still leaves room for the whole overlap before the music ends.
         let starts = beatMatched ? outgoing.downbeats : outgoing.beats
-        guard let outStart = starts.last(where: { $0 + fade <= end && $0 >= notBefore }) else { return nil }
+        guard let outStart = starts.last(where: { $0 + fadeTrack <= end && $0 >= notBefore }) else { return nil }
         // Don't cut more than ~45 s of the outgoing song.
         guard outDuration - outStart < 45 else { return nil }
 
@@ -321,7 +326,7 @@ enum AutomixPlanner {
             .first { $0 >= incoming.musicStart - 0.05 } ?? max(0, incoming.musicStart)
 
         let summary = beatMatched
-            ? String(format: "Automix %.0f→%.0f BPM, %d beats, rate %.3f", incoming.bpm, outgoing.bpm, overlapBeats, rate)
+            ? String(format: "Automix %.0f→%.0f BPM, %d beats, rate %.3f", incoming.bpm, outgoing.bpm * outgoingRate, overlapBeats, rate)
             : String(format: "Automix fade %.1fs (tempos %.0f/%.0f BPM don't match)", fade, outgoing.bpm, incoming.bpm)
         return TransitionPlan(outStart: outStart, inStart: inStart, fadeSeconds: fade, rate: rate,
                               swapAt: 0.5, beatMatched: beatMatched, summary: summary)
