@@ -21,8 +21,8 @@ enum ListenBrainz {
                 "track_name": song.title,
                 "release_name": song.albumName ?? "",
                 "additional_info": [
-                    "media_player": "BitChord iOS",
-                    "submission_client": "BitChord iOS",
+                    "media_player": "FYT iOS",
+                    "submission_client": "FYT iOS",
                     "origin_url": "https://music.youtube.com/watch?v=\(song.videoId)",
                     "duration_ms": Int((song.durationSeconds ?? 0) * 1000),
                 ] as JObj,
@@ -143,7 +143,7 @@ final class DiscordPresence: NSObject, @unchecked Sendable {
         if let song, playing {
             let now = Date().timeIntervalSince1970
             var activity: JObj = [
-                "name": "BitChord",
+                "name": "FYT",
                 "type": 2,
                 "details": String(song.title.prefix(128)),
                 "state": String(("by " + song.artist).prefix(128)),

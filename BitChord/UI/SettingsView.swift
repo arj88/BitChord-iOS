@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct SettingsView: View {
     @Environment(AppSettings.self) private var settings
@@ -102,6 +103,7 @@ struct SettingsView: View {
                 Picker("Theme", selection: $settings.appearance) {
                     ForEach(AppearanceMode.allCases) { Text($0.rawValue).tag($0) }
                 }
+                AccentPicker(selection: $settings.accent)
                 Toggle("Colours from artwork", isOn: $settings.dynamicColors)
                 Toggle("Animated player background", isOn: $settings.animatedBackground)
             }
@@ -143,9 +145,8 @@ struct SettingsView: View {
             }
 
             Section("About") {
-                LabeledContent("Version", value: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0")
-                Link("BitChord on GitHub", destination: URL(string: "https://github.com/kushagrasinghx/BitChord")!)
-                Text("BitChord is not affiliated with, endorsed by, or connected to YouTube or Google.")
+                LabeledContent("Version", value: AppInfo.versionText)
+                Text("This FYT app is created by Lucky Raj and is not affiliated with, endorsed by, or connected to YouTube or Google.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }
@@ -163,4 +164,57 @@ struct SettingsView: View {
     }
 
     static let regions = ["US", "IN", "GB", "CA", "AU", "DE", "FR", "ES", "IT", "BR", "MX", "JP", "KR", "ID", "PH", "PK", "BD", "NG", "ZA", "AE", "SA", "TR", "RU", "NL", "SE"]
+}
+
+
+/// The app's version as shown in Settings, e.g. "1.1.0 (build 24)".
+enum AppInfo {
+    static var versionText: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "1.0"
+        let build = info?["CFBundleVersion"] as? String ?? ""
+        return build.isEmpty || build == "1" ? version : "\(version) (build \(build))"
+    }
+}
+
+/// A row of colour swatches for the app's accent colour.
+struct AccentPicker: View {
+    @Binding var selection: AccentChoice
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Accent colour")
+                Spacer()
+                Text(selection.label).foregroundStyle(.secondary)
+            }
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    ForEach(AccentChoice.allCases) { choice in
+                        Button {
+                            withAnimation(.snappy) { selection = choice }
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        } label: {
+                            Circle()
+                                .fill(choice.color)
+                                .frame(width: 30, height: 30)
+                                .overlay {
+                                    if selection == choice {
+                                        Image(systemName: "checkmark")
+                                            .font(.caption.weight(.bold))
+                                            .foregroundStyle(.white)
+                                    }
+                                }
+                                .padding(3)
+                                .overlay(Circle().stroke(selection == choice ? choice.color : .clear, lineWidth: 2))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(choice.label)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        }
+        .padding(.vertical, 4)
+    }
 }

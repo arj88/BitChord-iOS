@@ -7,7 +7,7 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.0.0"
+    MARKETING_VERSION: "1.1.0"
     CURRENT_PROJECT_VERSION: "1"
 packages:
   GoogleCast:
@@ -24,7 +24,7 @@ targets:
     info:
       path: BitChord/Info.plist
       properties:
-        CFBundleDisplayName: BitChord
+        CFBundleDisplayName: FYT
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen:
@@ -41,7 +41,7 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         UIStatusBarStyle: UIStatusBarStyleDefault
-        NSLocalNetworkUsageDescription: BitChord looks for TVs and speakers on your Wi-Fi so you can cast music to them.
+        NSLocalNetworkUsageDescription: FYT looks for TVs and speakers on your Wi-Fi so you can cast music to them.
         NSBonjourServices:
           - _googlecast._tcp
           - _CC1AD845._googlecast._tcp

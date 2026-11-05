@@ -35,6 +35,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} \
             build | tee xcodebuild.log | grep -E "error:|warning: .*BitChord|\*\* BUILD" || true
           # The app's own binary and Info.plist must exist: a bundle holding only an
           # embedded framework means the Swift code failed to compile.
@@ -70,13 +71,13 @@ jobs:
         run: |
           mkdir -p Payload
           cp -R build/Build/Products/Release-iphoneos/BitChord.app Payload/
-          zip -qr BitChord.ipa Payload
-          unzip -l BitChord.ipa | tail -3
+          zip -qr FYT.ipa Payload
+          unzip -l FYT.ipa | tail -3
 
       - uses: actions/upload-artifact@v4
         with:
-          name: BitChord-ipa
-          path: BitChord.ipa
+          name: FYT-ipa
+          path: FYT.ipa
           retention-days: 30
 
       # Also publish the bare .ipa on the repo's Releases page, so it downloads
@@ -87,7 +88,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="build-${{ github.run_number }}"
-          gh release create "$TAG" BitChord.ipa \
-            --title "BitChord iOS build ${{ github.run_number }}" \
+          gh release create "$TAG" FYT.ipa \
+            --title "FYT iOS build ${{ github.run_number }}" \
             --notes "Unsigned build of ${{ github.sha }}. Install with Sideloadly or AltStore." \
             --latest

@@ -42,7 +42,7 @@ enum LyricsProvider: String, CaseIterable, Codable, Identifiable {
 
 /// Fetches lyrics from the same key-less providers BitChord uses, best timing first.
 enum LyricsService {
-    static let agent = "BitChord-iOS (https://github.com/kushagrasinghx/BitChord)"
+    static let agent = "FYT-iOS (https://github.com/arj88/BitChord-iOS)"
 
     static func fetch(for song: Song, duration: Double?, lyricsBrowseId: String?,
                       providers: [LyricsProvider] = LyricsProvider.allCases) async -> Lyrics? {

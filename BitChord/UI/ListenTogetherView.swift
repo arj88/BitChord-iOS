@@ -35,7 +35,7 @@ struct ListenTogetherView: View {
                 Button("Save") { party.server = serverText }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Leave this on the default to listen with other BitChord users.")
+                Text("Leave this on the default to listen with other FYT users.")
             }
             .confirmationDialog("Leave the party?", isPresented: $confirmLeave, titleVisibility: .visible) {
                 Button("Leave Party", role: .destructive) { Task { await party.leave() } }
@@ -54,7 +54,7 @@ struct ListenTogetherView: View {
                     .foregroundStyle(Theme.accent)
                 Text("Listen with friends")
                     .font(.title3.weight(.semibold))
-                Text("Everyone in a party hears the same song at the same moment, and anyone can pick what plays. Works with BitChord on Android too.")
+                Text("Everyone in a party hears the same song at the same moment, and anyone can pick what plays. Works with the Android app too.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -119,7 +119,7 @@ struct ListenTogetherView: View {
                 }
                 HStack(spacing: 12) {
                     ShareLink(item: Party.inviteLink(code),
-                              message: Text("Listen with me on BitChord — party code \(code)")) {
+                              message: Text("Listen with me on FYT — party code \(code)")) {
                         Label("Invite", systemImage: "square.and.arrow.up")
                     }
                     .buttonStyle(.borderedProminent)

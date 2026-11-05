@@ -15,6 +15,42 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
     }
 }
 
+/// Accent colours offered in Settings → Appearance.
+enum AccentChoice: String, CaseIterable, Identifiable {
+    case red, youtube, pink, orange, yellow, green, mint, teal, blue, indigo, purple
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .red: "Red"
+        case .youtube: "FYT Red"
+        case .pink: "Pink"
+        case .orange: "Orange"
+        case .yellow: "Yellow"
+        case .green: "Green"
+        case .mint: "Mint"
+        case .teal: "Teal"
+        case .blue: "Blue"
+        case .indigo: "Indigo"
+        case .purple: "Purple"
+        }
+    }
+    var color: Color {
+        switch self {
+        case .red: Color(red: 0xFA / 255, green: 0x2D / 255, blue: 0x48 / 255)
+        case .youtube: Color(red: 0xFF / 255, green: 0x00 / 255, blue: 0x33 / 255)
+        case .pink: Color(red: 0xFF / 255, green: 0x37 / 255, blue: 0x9B / 255)
+        case .orange: Color(red: 0xFF / 255, green: 0x8A / 255, blue: 0x00 / 255)
+        case .yellow: Color(red: 0xFF / 255, green: 0xC4 / 255, blue: 0x00 / 255)
+        case .green: Color(red: 0x30 / 255, green: 0xD1 / 255, blue: 0x58 / 255)
+        case .mint: Color(red: 0x00 / 255, green: 0xC7 / 255, blue: 0xBE / 255)
+        case .teal: Color(red: 0x30 / 255, green: 0xB0 / 255, blue: 0xC7 / 255)
+        case .blue: Color(red: 0x0A / 255, green: 0x84 / 255, blue: 0xFF / 255)
+        case .indigo: Color(red: 0x5E / 255, green: 0x5C / 255, blue: 0xE6 / 255)
+        case .purple: Color(red: 0xBF / 255, green: 0x5A / 255, blue: 0xF2 / 255)
+        }
+    }
+}
+
 enum RepeatMode: String, Codable { case off, all, one }
 
 /// User preferences, persisted in UserDefaults (secrets in the Keychain).
@@ -25,6 +61,7 @@ final class AppSettings {
     private let d = UserDefaults.standard
 
     var appearance: AppearanceMode { didSet { d.set(appearance.rawValue, forKey: "appearance") } }
+    var accent: AccentChoice { didSet { d.set(accent.rawValue, forKey: "accent") } }
     var quality: AudioQuality { didSet { d.set(quality.rawValue, forKey: "quality"); StreamResolver.shared.quality = quality } }
     var downloadQuality: AudioQuality { didSet { d.set(downloadQuality.rawValue, forKey: "downloadQuality") } }
     var automix: Bool { didSet { d.set(automix, forKey: "automix") } }
@@ -54,6 +91,7 @@ final class AppSettings {
 
     private init() {
         appearance = AppearanceMode(rawValue: d.string(forKey: "appearance") ?? "") ?? .dark
+        accent = AccentChoice(rawValue: d.string(forKey: "accent") ?? "") ?? .red
         quality = AudioQuality(rawValue: d.string(forKey: "quality") ?? "") ?? .high
         downloadQuality = AudioQuality(rawValue: d.string(forKey: "downloadQuality") ?? "") ?? .opus
         automix = d.bool(forKey: "automix")

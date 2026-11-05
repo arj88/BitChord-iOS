@@ -2,8 +2,8 @@ import SwiftUI
 import UIKit
 
 enum Theme {
-    /// Apple Music's red, used sparingly as BitChord does.
-    static let accent = Color(red: 0xFA / 255, green: 0x2D / 255, blue: 0x48 / 255)
+    /// The accent colour the user picked in Settings.
+    @MainActor static var accent: Color { AppSettings.shared.accent.color }
     static let secondaryText = Color(UIColor.secondaryLabel)
     static let cardCorner: CGFloat = 8
 }
