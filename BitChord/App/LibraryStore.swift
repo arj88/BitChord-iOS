@@ -1,5 +1,7 @@
 import Foundation
 import Observation
+import UIKit
+import UserNotifications
 
 struct LocalPlaylist: Codable, Identifiable, Hashable {
     var id = UUID().uuidString
@@ -52,6 +54,53 @@ final class LibraryStore {
     private var saveTask: Task<Void, Never>?
     private var downloadTasks: [String: Task<Void, Never>] = [:]
     @ObservationIgnored private var runningDownloads = 0
+
+    // The current batch of downloads, for the progress bar and the "done" notification.
+    private(set) var batchTotal = 0
+    private(set) var batchDone = 0
+    private(set) var batchFailed = 0
+    /// A short message shown above the mini player ("Downloading 40 songs", "Downloaded ✓").
+    private(set) var downloadNotice: String?
+    @ObservationIgnored private var noticeTask: Task<Void, Never>?
+
+    var isDownloading: Bool { batchTotal > 0 && batchDone + batchFailed < batchTotal }
+
+    /// 0…1 across the whole batch, counting songs part-way through.
+    var batchProgress: Double {
+        guard batchTotal > 0 else { return 0 }
+        let partial = downloadStates.values.reduce(0.0) { acc, state in
+            if case .downloading(let p) = state { return acc + p }
+            return acc
+        }
+        return min(1, (Double(batchDone + batchFailed) + partial) / Double(batchTotal))
+    }
+
+    private func notice(_ text: String, for seconds: Double = 2.5) {
+        downloadNotice = text
+        noticeTask?.cancel()
+        noticeTask = Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            if !Task.isCancelled { self.downloadNotice = nil }
+        }
+    }
+
+    private func finishBatchIfDone() {
+        guard batchTotal > 0, batchDone + batchFailed >= batchTotal else { return }
+        let done = batchDone, failed = batchFailed
+        batchTotal = 0; batchDone = 0; batchFailed = 0
+        let text = failed == 0
+            ? (done == 1 ? "Downloaded ✓" : "Downloaded \(done) songs ✓")
+            : "Downloaded \(done), \(failed) failed — see Downloads"
+        notice(text, for: 4)
+        UINotificationFeedbackGenerator().notificationOccurred(failed == 0 ? .success : .warning)
+        // A notification too, for when the app is in the background.
+        if UIApplication.shared.applicationState != .active {
+            let content = UNMutableNotificationContent()
+            content.title = "Downloads finished"
+            content.body = text
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "downloads-\(UUID().uuidString)", content: content, trigger: nil))
+        }
+    }
     /// Like/unlike changes made here recently, so a sync doesn't undo them before
     /// YouTube has caught up: videoId → (liked, when).
     @ObservationIgnored private var recentLikeChanges: [String: (liked: Bool, at: Date)] = [:]
@@ -231,13 +280,24 @@ final class LibraryStore {
     func isDownloaded(_ song: Song) -> Bool { downloadStates[song.videoId] == .done }
 
     func download(_ songs: [Song]) {
+        var added: [Song] = []
         for song in songs where !song.isLocal && downloadStates[song.videoId] != .done && downloadTasks[song.videoId] == nil {
             downloadStates[song.videoId] = .queued
             pendingDownloads[song.videoId] = song
+            added.append(song)
             downloadTasks[song.videoId] = Task { [weak self] in
                 await self?.performDownload(song)
             }
         }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        guard !added.isEmpty else {
+            notice(songs.isEmpty ? "Nothing to download" : "Already downloaded ✓")
+            return
+        }
+        batchTotal += added.count
+        notice(added.count == 1 ? "Downloading “\(added[0].title)”" : "Downloading \(added.count) songs")
+        // Ask once, the first time, so a finished batch can say so from the background.
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
     private func performDownload(_ song: Song) async {
@@ -268,6 +328,8 @@ final class LibraryStore {
             }
             downloadStates[id] = .done
             pendingDownloads[id] = nil
+            batchDone += 1
+            finishBatchIfDone()
             downloads.removeAll { $0.videoId == id }
             downloads.insert(song, at: 0)
             ArtworkStore.prefetch(song.artwork(544))
@@ -275,6 +337,8 @@ final class LibraryStore {
         } catch {
             if Task.isCancelled { return }
             downloadStates[id] = .failed(error.localizedDescription)
+            batchFailed += 1
+            finishBatchIfDone()
         }
         downloadTasks[id] = nil
     }
@@ -296,9 +360,15 @@ final class LibraryStore {
 
     func cancelDownload(_ song: Song) {
         downloadTasks[song.videoId]?.cancel()
+        let wasActive: Bool
+        switch downloadStates[song.videoId] {
+        case .queued, .downloading: wasActive = true
+        default: wasActive = false
+        }
         downloadTasks[song.videoId] = nil
         downloadStates[song.videoId] = nil
         pendingDownloads[song.videoId] = nil
+        if wasActive && batchTotal > 0 { batchTotal -= 1; finishBatchIfDone() }
     }
 
     func retryDownload(_ song: Song) {

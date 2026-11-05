@@ -82,8 +82,17 @@ struct SongRow: View {
                         if song.isExplicit { ExplicitBadge() }
                     }
                     HStack(spacing: 4) {
-                        if library.isDownloaded(song) {
+                        switch library.downloadStates[song.videoId] {
+                        case .some(.done):
                             Image(systemName: "arrow.down.circle.fill").font(.caption2).foregroundStyle(.secondary)
+                        case .some(.downloading(let p)):
+                            ProgressRing(progress: p, lineWidth: 2).frame(width: 11, height: 11)
+                        case .some(.queued):
+                            Image(systemName: "clock").font(.caption2).foregroundStyle(.secondary)
+                        case .some(.failed):
+                            Image(systemName: "exclamationmark.circle.fill").font(.caption2).foregroundStyle(.red)
+                        case .none:
+                            EmptyView()
                         }
                         Text(subtitle ?? song.artist)
                             .font(.subheadline)

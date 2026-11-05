@@ -944,6 +944,7 @@ final class PlayerController {
         }
         let t = CMTimeGetSeconds(players[active].currentTime())
         if t.isFinite { position = duration > 0 ? min(t, duration) : t }
+        syncNowPlayingIfNeeded()
         // AVPlayer overestimates these files' length and keeps "playing" silence past the
         // end, so the end is called from the real duration rather than waiting for it.
         if let known = knownDurations[active], known > 0, isPlaying, !fading, !endHandled, t.isFinite, t >= known - 0.2 {
@@ -978,6 +979,7 @@ final class PlayerController {
         guard player == active else { return }
         if status == .playing { isLoading = false }
         if status == .waitingToPlayAtSpecifiedRate { isLoading = true }
+        updateNowPlaying()
     }
 
     // MARK: Radio
@@ -1068,7 +1070,7 @@ final class PlayerController {
 
     private func configureAudioSession() {
         let session = AVAudioSession.sharedInstance()
-        try? session.setCategory(.playback, mode: .default, policy: .longFormAudio)
+        try? session.setCategory(.playback, mode: .default, options: [])
         NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] note in
             guard let info = note.userInfo, let raw = info[AVAudioSessionInterruptionTypeKey] as? UInt,
                   let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
@@ -1131,13 +1133,41 @@ final class PlayerController {
         }
     }
 
+    // What the lock screen was last told, so it can be corrected when it drifts.
+    @ObservationIgnored private var nowPlayingElapsed: Double = 0
+    @ObservationIgnored private var nowPlayingRate: Double = 0
+    @ObservationIgnored private var nowPlayingDuration: Double = 0
+    @ObservationIgnored private var nowPlayingStamp = Date()
+
+    /// The rate the lock screen should count at: only while sound is actually coming out.
+    private var audibleRate: Double {
+        guard isPlaying else { return 0 }
+        if castControls != nil { return isLoading ? 0 : Double(playbackRate) }
+        return players[active].timeControlStatus == .playing ? Double(players[active].rate) : 0
+    }
+
+    /// Re-sends the position when the lock screen's own estimate has drifted from the player.
+    private func syncNowPlayingIfNeeded() {
+        let expected = nowPlayingElapsed + Date().timeIntervalSince(nowPlayingStamp) * nowPlayingRate
+        if abs(expected - livePosition()) > 0.75 || abs(audibleRate - nowPlayingRate) > 0.01
+            || (duration > 0 && abs(duration - nowPlayingDuration) > 0.5) {
+            updateNowPlaying()
+        }
+    }
+
     private func updateNowPlaying() {
         guard let song = current else { return }
+        let elapsed = livePosition()
+        let rate = audibleRate
+        nowPlayingElapsed = elapsed
+        nowPlayingRate = rate
+        nowPlayingDuration = duration
+        nowPlayingStamp = Date()
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: song.title,
             MPMediaItemPropertyArtist: song.artist,
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: position,
-            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? Double(playbackRate) : 0,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
+            MPNowPlayingInfoPropertyPlaybackRate: rate,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
         ]

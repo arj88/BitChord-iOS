@@ -10,31 +10,32 @@ struct RootView: View {
             NavigationStack(path: $router.homePath) {
                 HomeView().withRoutes()
             }
-            .safeAreaInset(edge: .bottom) { MiniPlayer() }
+            .safeAreaInset(edge: .bottom) { BottomAccessory() }
             .tabItem { Label("Home", systemImage: "house.fill") }
             .tag(AppTab.home)
 
             NavigationStack(path: $router.explorePath) {
                 ExploreView().withRoutes()
             }
-            .safeAreaInset(edge: .bottom) { MiniPlayer() }
+            .safeAreaInset(edge: .bottom) { BottomAccessory() }
             .tabItem { Label("Explore", systemImage: "square.grid.2x2.fill") }
             .tag(AppTab.explore)
 
             NavigationStack(path: $router.libraryPath) {
                 LibraryView().withRoutes()
             }
-            .safeAreaInset(edge: .bottom) { MiniPlayer() }
+            .safeAreaInset(edge: .bottom) { BottomAccessory() }
             .tabItem { Label("Library", systemImage: "music.note.list") }
             .tag(AppTab.library)
 
             NavigationStack(path: $router.searchPath) {
                 SearchView().withRoutes()
             }
-            .safeAreaInset(edge: .bottom) { MiniPlayer() }
+            .safeAreaInset(edge: .bottom) { BottomAccessory() }
             .tabItem { Label("Search", systemImage: "magnifyingglass") }
             .tag(AppTab.search)
         }
+        .onAppear { UIApplication.shared.beginReceivingRemoteControlEvents() }
         .fullScreenCover(isPresented: $router.showPlayer) {
             NowPlayingView()
                 .sheet(isPresented: $router.showParty) { ListenTogetherView() }
@@ -111,6 +112,82 @@ struct MiniPlayer: View {
             .padding(.horizontal, 8)
             .padding(.bottom, 4)
             .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+}
+
+/// What sits above the tab bar: download progress (when there is any) and the mini player.
+struct BottomAccessory: View {
+    @Environment(LibraryStore.self) private var library
+    var body: some View {
+        VStack(spacing: 6) {
+            DownloadStatusBar()
+            MiniPlayer()
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: library.isDownloading)
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: library.downloadNotice)
+    }
+}
+
+/// "Downloading 12 of 658" with a progress bar; tap to open Downloads.
+struct DownloadStatusBar: View {
+    @Environment(LibraryStore.self) private var library
+    @Environment(AppRouter.self) private var router
+
+    var body: some View {
+        let active = library.isDownloading
+        if active || library.downloadNotice != nil {
+            Button {
+                router.tab = .library
+                router.libraryPath = NavigationPath([Route.downloads])
+            } label: {
+                HStack(spacing: 10) {
+                    if active {
+                        ProgressRing(progress: library.batchProgress)
+                            .frame(width: 22, height: 22)
+                    } else {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(library.downloadNotice ?? "Downloading \(library.batchDone + 1) of \(library.batchTotal)")
+                            .font(.footnote.weight(.semibold))
+                            .lineLimit(1)
+                        if active && library.downloadNotice != nil {
+                            Text("\(library.batchDone) of \(library.batchTotal) done")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 4)
+                    if active {
+                        Text("\(Int(library.batchProgress * 100))%")
+                            .font(.caption.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
+                .background(Capsule().fill(.regularMaterial).shadow(color: .black.opacity(0.12), radius: 6, y: 2))
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .transition(.move(edge: .bottom).combined(with: .opacity))
+        }
+    }
+}
+
+/// A small determinate progress ring.
+struct ProgressRing: View {
+    let progress: Double
+    var lineWidth: CGFloat = 2.5
+    var body: some View {
+        ZStack {
+            Circle().stroke(Color.secondary.opacity(0.25), lineWidth: lineWidth)
+            Circle()
+                .trim(from: 0, to: max(0.03, min(1, progress)))
+                .stroke(Theme.accent, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .animation(.linear(duration: 0.25), value: progress)
         }
     }
 }
