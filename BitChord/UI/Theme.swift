@@ -3,7 +3,11 @@ import UIKit
 
 enum Theme {
     /// The accent colour the user picked in Settings.
-    @MainActor static var accent: Color { AppSettings.shared.accent.color }
+    @MainActor static var accent: Color {
+        let settings = AppSettings.shared
+        if settings.accent == .custom { return Color(hex: settings.customAccentHex) ?? AccentChoice.red.color }
+        return settings.accent.color
+    }
     static let secondaryText = Color(UIColor.secondaryLabel)
     static let cardCorner: CGFloat = 8
 }

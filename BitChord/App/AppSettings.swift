@@ -17,8 +17,9 @@ enum AppearanceMode: String, CaseIterable, Identifiable {
 
 /// Accent colours offered in Settings → Appearance.
 enum AccentChoice: String, CaseIterable, Identifiable {
-    case red, youtube, pink, orange, yellow, green, mint, teal, blue, indigo, purple
+    case red, youtube, pink, orange, yellow, green, mint, teal, blue, indigo, purple, custom
     var id: String { rawValue }
+    static var presets: [AccentChoice] { allCases.filter { $0 != .custom } }
     var label: String {
         switch self {
         case .red: "Red"
@@ -32,6 +33,7 @@ enum AccentChoice: String, CaseIterable, Identifiable {
         case .blue: "Blue"
         case .indigo: "Indigo"
         case .purple: "Purple"
+        case .custom: "Custom"
         }
     }
     var color: Color {
@@ -47,7 +49,26 @@ enum AccentChoice: String, CaseIterable, Identifiable {
         case .blue: Color(red: 0x0A / 255, green: 0x84 / 255, blue: 0xFF / 255)
         case .indigo: Color(red: 0x5E / 255, green: 0x5C / 255, blue: 0xE6 / 255)
         case .purple: Color(red: 0xBF / 255, green: 0x5A / 255, blue: 0xF2 / 255)
+        case .custom: Color(hex: AccentChoice.lastCustomHex) ?? Color(red: 0xFA / 255, green: 0x2D / 255, blue: 0x48 / 255)
         }
+    }
+}
+
+extension AccentChoice {
+    /// Mirrors AppSettings.customAccentHex so `color` works without the main actor.
+    nonisolated(unsafe) static var lastCustomHex = UserDefaults.standard.string(forKey: "customAccentHex") ?? "#FF0033"
+}
+
+extension Color {
+    /// "#FF0033", "FF0033" or "#F03" → a colour; nil if it isn't valid hex.
+    init?(hex: String) {
+        var text = hex.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if text.hasPrefix("#") { text.removeFirst() }
+        if text.count == 3 { text = text.map { "\($0)\($0)" }.joined() }
+        guard text.count == 6, let value = UInt32(text, radix: 16) else { return nil }
+        self.init(red: Double((value >> 16) & 0xFF) / 255,
+                  green: Double((value >> 8) & 0xFF) / 255,
+                  blue: Double(value & 0xFF) / 255)
     }
 }
 
@@ -62,6 +83,9 @@ final class AppSettings {
 
     var appearance: AppearanceMode { didSet { d.set(appearance.rawValue, forKey: "appearance") } }
     var accent: AccentChoice { didSet { d.set(accent.rawValue, forKey: "accent") } }
+    var customAccentHex: String {
+        didSet { d.set(customAccentHex, forKey: "customAccentHex"); AccentChoice.lastCustomHex = customAccentHex }
+    }
     var quality: AudioQuality { didSet { d.set(quality.rawValue, forKey: "quality"); StreamResolver.shared.quality = quality } }
     var downloadQuality: AudioQuality { didSet { d.set(downloadQuality.rawValue, forKey: "downloadQuality") } }
     var automix: Bool { didSet { d.set(automix, forKey: "automix") } }
@@ -92,6 +116,7 @@ final class AppSettings {
     private init() {
         appearance = AppearanceMode(rawValue: d.string(forKey: "appearance") ?? "") ?? .dark
         accent = AccentChoice(rawValue: d.string(forKey: "accent") ?? "") ?? .red
+        customAccentHex = d.string(forKey: "customAccentHex") ?? "#FF0033"
         quality = AudioQuality(rawValue: d.string(forKey: "quality") ?? "") ?? .high
         downloadQuality = AudioQuality(rawValue: d.string(forKey: "downloadQuality") ?? "") ?? .opus
         automix = d.bool(forKey: "automix")

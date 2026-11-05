@@ -25,6 +25,7 @@ targets:
       path: BitChord/Info.plist
       properties:
         CFBundleDisplayName: FYT
+        CFBundleName: FYT
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen:

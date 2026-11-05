@@ -103,7 +103,7 @@ struct SettingsView: View {
                 Picker("Theme", selection: $settings.appearance) {
                     ForEach(AppearanceMode.allCases) { Text($0.rawValue).tag($0) }
                 }
-                AccentPicker(selection: $settings.accent)
+                AccentPicker(selection: $settings.accent, customHex: $settings.customAccentHex)
                 Toggle("Colours from artwork", isOn: $settings.dynamicColors)
                 Toggle("Animated player background", isOn: $settings.animatedBackground)
             }
@@ -177,44 +177,87 @@ enum AppInfo {
     }
 }
 
-/// A row of colour swatches for the app's accent colour.
+/// A row of colour swatches for the app's accent colour, plus a custom hex value.
 struct AccentPicker: View {
     @Binding var selection: AccentChoice
+    @Binding var customHex: String
+    @State private var draft = ""
+    @FocusState private var editing: Bool
+
+    private var draftColor: Color? { Color(hex: draft) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Accent colour")
                 Spacer()
-                Text(selection.label).foregroundStyle(.secondary)
+                Text(selection == .custom ? customHex.uppercased() : selection.label).foregroundStyle(.secondary)
             }
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
-                    ForEach(AccentChoice.allCases) { choice in
-                        Button {
-                            withAnimation(.snappy) { selection = choice }
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        } label: {
-                            Circle()
-                                .fill(choice.color)
-                                .frame(width: 30, height: 30)
-                                .overlay {
-                                    if selection == choice {
-                                        Image(systemName: "checkmark")
-                                            .font(.caption.weight(.bold))
-                                            .foregroundStyle(.white)
-                                    }
-                                }
-                                .padding(3)
-                                .overlay(Circle().stroke(selection == choice ? choice.color : .clear, lineWidth: 2))
+                    ForEach(AccentChoice.presets) { choice in
+                        swatch(choice.color, selected: selection == choice, label: choice.label) {
+                            selection = choice
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(choice.label)
                     }
                 }
                 .padding(.vertical, 2)
             }
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(draftColor ?? Color(hex: customHex) ?? .gray)
+                    .frame(width: 26, height: 26)
+                    .overlay(Circle().stroke(.white.opacity(selection == .custom ? 0.9 : 0), lineWidth: 2))
+                Text("#").foregroundStyle(.secondary)
+                TextField("FF0033", text: $draft)
+                    .font(.body.monospaced())
+                    .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .keyboardType(.asciiCapable)
+                    .submitLabel(.done)
+                    .focused($editing)
+                    .onChange(of: draft) { _, value in
+                        let cleaned = String(value.uppercased().filter { "0123456789ABCDEF".contains($0) }.prefix(6))
+                        if cleaned != value { draft = cleaned }
+                    }
+                    .onSubmit(apply)
+                Button("Use", action: apply)
+                    .buttonStyle(.bordered)
+                    .disabled(draftColor == nil)
+            }
+            if !draft.isEmpty && draftColor == nil {
+                Text("Enter 6 hex digits, like FF0033").font(.caption).foregroundStyle(.secondary)
+            }
         }
         .padding(.vertical, 4)
+        .onAppear { draft = customHex.replacingOccurrences(of: "#", with: "").uppercased() }
+    }
+
+    private func apply() {
+        guard draftColor != nil else { return }
+        customHex = "#" + draft
+        withAnimation(.snappy) { selection = .custom }
+        editing = false
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    private func swatch(_ color: Color, selected: Bool, label: String, action: @escaping () -> Void) -> some View {
+        Button {
+            withAnimation(.snappy) { action() }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        } label: {
+            Circle()
+                .fill(color)
+                .frame(width: 30, height: 30)
+                .overlay {
+                    if selected {
+                        Image(systemName: "checkmark").font(.caption.weight(.bold)).foregroundStyle(.white)
+                    }
+                }
+                .padding(3)
+                .overlay(Circle().stroke(selected ? color : .clear, lineWidth: 2))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 }

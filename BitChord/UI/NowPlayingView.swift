@@ -244,12 +244,7 @@ struct NowPlayingView: View {
 
             if cast.isConnected {
                 VStack(spacing: 6) {
-                    HStack(spacing: 10) {
-                        Image(systemName: "speaker.fill").font(.caption).opacity(0.7)
-                        Slider(value: Binding(get: { Double(cast.volume) }, set: { cast.setVolume(Float($0)) }), in: 0...1)
-                            .tint(.white)
-                        Image(systemName: "speaker.wave.3.fill").font(.caption).opacity(0.7)
-                    }
+                    LevelBar(value: Double(cast.volume)) { cast.setVolume(Float($0)) }
                     Label("Playing on \(cast.deviceName ?? "TV")", systemImage: "tv")
                         .font(.caption.weight(.semibold))
                         .opacity(0.8)
@@ -258,11 +253,7 @@ struct NowPlayingView: View {
                     }
                 }
             } else {
-                HStack(spacing: 10) {
-                    Image(systemName: "speaker.fill").font(.caption).opacity(0.7)
-                    VolumeSlider().frame(height: 34)
-                    Image(systemName: "speaker.wave.3.fill").font(.caption).opacity(0.7)
-                }
+                VolumeBar()
             }
 
             HStack {
@@ -383,14 +374,104 @@ struct ProgressBar: View {
     }
 }
 
-struct VolumeSlider: UIViewRepresentable {
+/// The phone's volume, drawn like the progress bar, with speaker icons either side.
+/// A hidden MPVolumeView does the actual volume change (and keeps iOS's own
+/// volume pop-up away while the player is open).
+struct VolumeBar: View {
+    @State private var volume = SystemVolume()
+
+    var body: some View {
+        LevelBar(value: Double(volume.level)) { volume.set(Float($0)) }
+            .background(alignment: .topLeading) {
+                HiddenVolumeView(volume: volume).frame(width: 1, height: 1).opacity(0.01)
+                    .allowsHitTesting(false)
+            }
+    }
+}
+
+/// A capsule slider with a quiet and a loud speaker icon, all on one centre line.
+struct LevelBar: View {
+    let value: Double
+    let onChange: (Double) -> Void
+    @State private var dragging = false
+    @State private var dragValue: Double = 0
+    @State private var startValue: Double = 0
+
+    var body: some View {
+        let shown = dragging ? dragValue : min(max(value, 0), 1)
+        HStack(spacing: 12) {
+            Image(systemName: "speaker.fill")
+                .font(.footnote)
+                .frame(width: 20)
+                .opacity(shown <= 0.001 ? 1 : 0.65)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.25))
+                    Capsule().fill(.white.opacity(dragging ? 1 : 0.85))
+                        .frame(width: geo.size.width * CGFloat(shown))
+                }
+                .frame(height: dragging ? 12 : 7)
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { g in
+                        if !dragging {
+                            dragging = true
+                            startValue = shown
+                        }
+                        let moved = Double(g.translation.width / max(geo.size.width, 1))
+                        dragValue = min(max(startValue + moved, 0), 1)
+                        onChange(dragValue)
+                    }
+                    .onEnded { _ in dragging = false })
+                .animation(.spring(response: 0.3), value: dragging)
+            }
+            .frame(height: 30)
+            Image(systemName: "speaker.wave.3.fill")
+                .font(.footnote)
+                .frame(width: 26)
+                .opacity(shown >= 0.999 ? 1 : 0.65)
+        }
+    }
+}
+
+/// The phone's output volume, kept current as the volume buttons are pressed.
+@MainActor
+@Observable
+final class SystemVolume {
+    private(set) var level: Float = AVAudioSession.sharedInstance().outputVolume
+    @ObservationIgnored weak var slider: UISlider?
+    @ObservationIgnored private var observation: NSKeyValueObservation?
+
+    init() {
+        observation = AVAudioSession.sharedInstance().observe(\.outputVolume, options: [.new]) { [weak self] _, change in
+            guard let value = change.newValue else { return }
+            Task { @MainActor in self?.level = value }
+        }
+    }
+
+    func set(_ value: Float) {
+        level = value
+        guard let slider else { return }
+        slider.value = value
+        slider.sendActions(for: .valueChanged)
+    }
+}
+
+private struct HiddenVolumeView: UIViewRepresentable {
+    let volume: SystemVolume
     func makeUIView(context: Context) -> MPVolumeView {
-        let view = MPVolumeView(frame: .zero)
-        view.tintColor = .white
-        view.setVolumeThumbImage(UIImage(), for: .normal)
+        let view = MPVolumeView(frame: CGRect(x: 0, y: 0, width: 100, height: 30))
+        Task { @MainActor in
+            volume.slider = view.subviews.compactMap { $0 as? UISlider }.first
+        }
         return view
     }
-    func updateUIView(_ uiView: MPVolumeView, context: Context) {}
+    func updateUIView(_ uiView: MPVolumeView, context: Context) {
+        if volume.slider == nil {
+            volume.slider = uiView.subviews.compactMap { $0 as? UISlider }.first
+        }
+    }
 }
 
 /// Google's Cast button: lists TVs and Chromecasts on the Wi-Fi, and shows when connected.
