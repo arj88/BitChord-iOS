@@ -87,9 +87,7 @@ struct NowPlayingView: View {
                 }
             }
             Spacer()
-            Menu { menuItems } label: {
-                Image(systemName: "ellipsis").font(.title3.weight(.semibold)).frame(width: 40, height: 40)
-            }
+            OutputButton()
         }
         .padding(.top, 8)
     }
@@ -259,9 +257,13 @@ struct NowPlayingView: View {
             HStack {
                 modeButton(.lyrics, icon: "quote.bubble")
                 Spacer()
-                AirPlayButton().frame(width: 44, height: 44)
-                Spacer()
-                CastButton().frame(width: 44, height: 44)
+                Menu { menuItems } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.title3)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
                 Spacer()
                 modeButton(.queue, icon: "list.bullet")
             }
@@ -383,8 +385,12 @@ struct VolumeBar: View {
     var body: some View {
         LevelBar(value: Double(volume.level)) { volume.set(Float($0)) }
             .background(alignment: .topLeading) {
-                HiddenVolumeView(volume: volume).frame(width: 1, height: 1).opacity(0.01)
+                HiddenVolumeView(volume: volume)
+                    .frame(width: 1, height: 1)
+                    .clipped()
+                    .opacity(0.001)
                     .allowsHitTesting(false)
+                    .accessibilityHidden(true)
             }
     }
 }
@@ -482,6 +488,83 @@ struct CastButton: UIViewRepresentable {
         return button
     }
     func updateUIView(_ uiView: GCKUICastButton, context: Context) {}
+}
+
+/// One button for where the sound goes: AirPlay & Bluetooth, or a TV over Google Cast.
+struct OutputButton: View {
+    @Environment(CastManager.self) private var cast
+    @State private var airPlay = RoutePickerTrigger()
+    @State private var externalRoute = OutputButton.isExternalRoute()
+
+    var body: some View {
+        Menu {
+            Button {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { airPlay.show() }
+            } label: {
+                Label("AirPlay & Bluetooth", systemImage: "airplay.audio")
+            }
+            if cast.isConnected {
+                Button(role: .destructive) { cast.disconnect() } label: {
+                    Label("Stop Casting to \(cast.deviceName ?? "TV")", systemImage: "tv.slash")
+                }
+            } else {
+                Button {
+                    // The Cast SDK only starts looking for TVs after a tap on its own button.
+                    GCKCastContext.sharedInstance().discoveryManager.startDiscovery()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        GCKCastContext.sharedInstance().presentCastDialog()
+                    }
+                } label: {
+                    Label("Cast to TV", systemImage: "tv")
+                }
+            }
+        } label: {
+            Image(systemName: cast.isConnected ? "tv" : "airplay.audio")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(cast.isConnected || externalRoute ? Theme.accent : .white)
+                .frame(width: 40, height: 40)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background {
+            HiddenRoutePicker(trigger: airPlay)
+                .frame(width: 1, height: 1)
+                .clipped()
+                .opacity(0.001)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { _ in
+            DispatchQueue.main.async { externalRoute = OutputButton.isExternalRoute() }
+        }
+    }
+
+    /// True when the sound is going to AirPlay or Bluetooth rather than the phone.
+    static func isExternalRoute() -> Bool {
+        AVAudioSession.sharedInstance().currentRoute.outputs.contains {
+            [.airPlay, .bluetoothA2DP, .bluetoothLE, .bluetoothHFP, .carAudio].contains($0.portType)
+        }
+    }
+}
+
+/// Opens iOS's AirPlay picker from our own button, through a hidden AVRoutePickerView.
+@MainActor
+final class RoutePickerTrigger {
+    weak var picker: AVRoutePickerView?
+    func show() {
+        picker?.subviews.compactMap { $0 as? UIButton }.first?.sendActions(for: .touchUpInside)
+    }
+}
+
+private struct HiddenRoutePicker: UIViewRepresentable {
+    let trigger: RoutePickerTrigger
+    func makeUIView(context: Context) -> AVRoutePickerView {
+        let view = AVRoutePickerView(frame: CGRect(x: 0, y: 0, width: 30, height: 30))
+        view.prioritizesVideoDevices = false
+        trigger.picker = view
+        return view
+    }
+    func updateUIView(_ uiView: AVRoutePickerView, context: Context) { trigger.picker = uiView }
 }
 
 struct AirPlayButton: UIViewRepresentable {
