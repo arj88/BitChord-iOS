@@ -98,6 +98,14 @@ struct NowPlayingView: View {
     private var menuItems: some View {
         if let song = player.current {
             SongMenuItems(song: song)
+            if !song.isLocal, AudioCache.url(for: song.videoId) != nil {
+                Button(role: .destructive) {
+                    AudioCache.remove(song.videoId)
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                } label: {
+                    Label("Remove from Cache", systemImage: "trash")
+                }
+            }
             Divider()
         }
         Menu {
@@ -250,7 +258,11 @@ struct NowPlayingView: View {
                     }
                 }
             } else {
-                VolumeSlider().frame(height: 34)
+                HStack(spacing: 10) {
+                    Image(systemName: "speaker.fill").font(.caption).opacity(0.7)
+                    VolumeSlider().frame(height: 34)
+                    Image(systemName: "speaker.wave.3.fill").font(.caption).opacity(0.7)
+                }
             }
 
             HStack {

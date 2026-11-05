@@ -294,6 +294,19 @@ enum AudioCache {
         try? FileManager.default.removeItem(at: directory)
     }
 
+    /// Deletes one song's cached audio. Returns the bytes freed (0 if nothing was cached).
+    @discardableResult
+    static func remove(_ videoId: String) -> Int64 {
+        var freed: Int64 = 0
+        for ext in ["caf", "m4a"] {
+            let u = directory.appendingPathComponent("\(videoId).\(ext)")
+            guard FileManager.default.fileExists(atPath: u.path) else { continue }
+            freed += Int64((try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            try? FileManager.default.removeItem(at: u)
+        }
+        return freed
+    }
+
     private static func trim() {
         let keys: [URLResourceKey] = [.fileSizeKey, .contentAccessDateKey]
         var files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? []
