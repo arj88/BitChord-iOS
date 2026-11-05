@@ -72,6 +72,25 @@ jobs:
           otool -L "$APP/BitChord" | grep -i googlecast || true
           du -sh "$APP"
 
+      - name: Add alternate app icons
+        run: |
+          # Small ready-made icon files instead of asset-catalog alternates (which cost ~3 MB each).
+          APP=build/Build/Products/Release-iphoneos/BitChord.app
+          PB=/usr/libexec/PlistBuddy
+          cp AltIcons/*.png "$APP/"
+          for KEY in CFBundleIcons "CFBundleIcons~ipad"; do
+            $PB -c "Add :$KEY dict" "$APP/Info.plist" 2>/dev/null || true
+            $PB -c "Delete :$KEY:CFBundleAlternateIcons" "$APP/Info.plist" 2>/dev/null || true
+            $PB -c "Add :$KEY:CFBundleAlternateIcons dict" "$APP/Info.plist"
+            for NAME in AppIconDark AppIconPurple AppIconBlue AppIconGreen AppIconOrange AppIconPink; do
+              $PB -c "Add :$KEY:CFBundleAlternateIcons:$NAME dict" "$APP/Info.plist"
+              $PB -c "Add :$KEY:CFBundleAlternateIcons:$NAME:CFBundleIconFiles array" "$APP/Info.plist"
+              $PB -c "Add :$KEY:CFBundleAlternateIcons:$NAME:CFBundleIconFiles:0 string $NAME" "$APP/Info.plist"
+            done
+          done
+          $PB -c "Print :CFBundleIcons:CFBundleAlternateIcons" "$APP/Info.plist"
+          test -f "$APP/AppIconPink@3x.png"
+
       - name: Package .ipa
         run: |
           mkdir -p Payload
